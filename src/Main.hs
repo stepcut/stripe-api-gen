@@ -20,9 +20,11 @@ import Data.Maybe (fromJust, isJust, fromMaybe)
 import Data.OpenApi
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.String (IsString(fromString))
-import Data.List (sortOn)
+import Data.List (sortOn, sort)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.IO as T
+import GHC.Driver.Session (getDynFlags)
 import GHC.SourceGen
 import GHC.Paths (libdir)
 import GHC (runGhc, noLoc)
@@ -43,6 +45,7 @@ import GHC.Types.SrcLoc (SrcSpan, Located, GenLocated(..), mkGeneralSrcSpan, mkR
 import GHC.Types.Fixity (LexicalFixity(Prefix))
 import GHC.Utils.Error (DiagOpts(..))
 import GHC.Utils.Outputable (defaultSDocContext)
+import Ormolu (ormolu, defaultConfig)
 import System.FilePath (splitPath)
 import Text.Casing (pascal, camel)
 import Text.PrettyPrint.GenericPretty
@@ -468,10 +471,15 @@ subscriptionSchema o =
 data Method = GET | POST | DELETE
   deriving (Eq, Ord, Read, Show)
 
+mkParamName :: Param -> RdrNameStr
+mkParamName p =
+  case _paramName p of
+    "expand" -> fromString "ExpandParam"
+    n        -> fromString $ textToPascalName n
 
 mkStripeHasParam :: OccNameStr -> Referenced Param -> HsDecl'
 mkStripeHasParam opName (Inline param) =
-  instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var (textToPascalName $ _paramName param))) []
+  instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var $ mkParamName param)) []
 
 mkStripeHasParamFromProperty :: OccNameStr -> (Text, (Referenced Schema)) -> [(HsDecl', InsOrdHashMap Text [HsDecl'])]
 mkStripeHasParamFromProperty opName (pName, (Inline schema)) =
@@ -549,7 +557,7 @@ mkUrl (pt:pts) =
         (Just patTy) -> (patTy:patTys)
   in (patTys', op expl "</>" expr)
 
-mkRequestDecl :: Text -> Text -> Operation -> [HsDecl']
+mkRequestDecl :: Text -> Text -> Operation -> ([HsDecl'], [RdrNameStr])
 mkRequestDecl path method oper =
   let opName :: OccNameStr
       opName   = textToCamelName $ fromJust $ _operationOperationId oper
@@ -578,11 +586,16 @@ mkRequestDecl path method oper =
           ps -> extractTemplate (pats, valBind "url" (mkUrlFromPaths ps))
       -}
       params  = valBind "params" (var "[]")
-  in  [ typeSig opName ty
-      , funBind opName (matchGRHSs pats (rhs (var "request") `where'` [request, url, params]))
-      ]
+  in  ([ typeSig opName ty
+       , funBind opName (matchGRHSs pats (rhs (var "request") `where'` [request, url, params]))
+       ]
+      , [ opName', textToCamelName $ fromJust $ _operationOperationId oper ]
+      )
 
-mkOperation :: Text -> Text -> Operation -> [HsDecl']
+mkOperation :: Text -- ^ path
+            -> Text -- ^ method
+            -> Operation
+            -> ([HsDecl'], [RdrNameStr]) -- ^ (decls, things to export)
 mkOperation path method op =
   let opName :: OccNameStr
       opName   = textToPascalName $ fromJust $ _operationOperationId op
@@ -596,27 +609,66 @@ mkOperation path method op =
             case InsOrd.lookup 200 (_responsesResponses (_operationResponses op)) of
               (Just (Inline resp)) -> responseType resp
 
-      requestDecl = mkRequestDecl path method op
+      (requestDecl, requestTypes) = mkRequestDecl path method op
 
       stripeReturnDecl = tyFamInst "StripeReturn" [var $ UnqualStr opName] returnTy
 
 --      map referencedParamToDecl (_operationParameters $ fromJust $ _pathItemPost pi)
-  in (requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls))
+  in ((requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls)), requestTypes)
 
+
+-- create Web.Stripe.Account module
+mkAccount :: OpenApi -> IO ()
+mkAccount s =
+  do let path = "/v1/account"
+         (Just pi) = InsOrd.lookup path (_openApiPaths s)
+         (Just op) = _pathItemGet pi
+         (opDecls, additionalExports) = mkOperation path "GET" op
+     let reexportTypes = [ thingAll "Account"
+                         , thingAll "AccountId"
+                         ]
+
+         imports = [ import' "Web.Stripe.StripeRequest" `exposing`
+                     [ thingWith "Method" ["GET"]
+                     , thingAll "StripeRequest"
+                     , var "StripeReturn"
+                     , var "mkStripeRequest" ]
+                   , import' "Web.Stripe.Types" `exposing` reexportTypes
+                   ]
+         exports = Just (reexportTypes ++ (map var additionalExports))
+         modul  = module' (Just $ "Web.Stripe.Account") exports imports opDecls
+         pragmas = [ "{-# LANGUAGE FlexibleInstances #-}"
+                   , "{-# LANGUAGE MultiParamTypeClasses #-}"
+                   , "{-# LANGUAGE OverloadedStrings #-}"
+                   , "{-# LANGUAGE TypeFamilies #-}"
+                   ]
+     t <- runGhc (Just libdir) $
+       do dflags <- getDynFlags
+          pure $ showPpr dflags modul
+     formatted <- ormolu defaultConfig "Web/Stripe/Account.hs" (T.unlines pragmas <> T.pack t)
+     T.putStr formatted
+     pure ()
 
 main :: IO ()
 main =
   do s <- readSpec
-     let componentName = "application_fee"
+
+     mkAccount s
+{-
+     let allPaths = InsOrd.toList (_openApiPaths s)
+     mapM_ print (sort $ map fst allPaths)
+     print (length allPaths)
+     let componentName = "balance_amount"
          (Just comp) = InsOrd.lookup componentName $ _componentsSchemas (_openApiComponents s)
 
      let cs :: [(Text, Schema)]
          cs = InsOrd.toList (_componentsSchemas (_openApiComponents s))
          decls = concatMap (\(n,s) -> schemaToTypeDecls n s) [(componentName, comp)]
-
-     print $ ppSchema comp
-     runGhc (Just libdir) $ putPpr $
-       module' (Just $ textToPascalName componentName) Nothing [] decls
+-}
+--      print $ ppSchema comp
+--     runGhc (Just libdir) $ putPpr $
+--       module' (Just $ textToPascalName componentName) Nothing [] decls
+     pure ()
 {-
   do s <- readSpec
      let ss = subscriptionSchema s

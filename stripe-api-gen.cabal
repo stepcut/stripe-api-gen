@@ -23,6 +23,7 @@ library
                        ghc-source-gen,
                        insert-ordered-containers,
                        openapi3,
+                       ormolu,
                        pretty,
                        text
   hs-source-dirs:      lib
@@ -43,6 +44,7 @@ executable stripe-api-gen
                        GenericPretty,
                        insert-ordered-containers,
                        openapi3,
+                       ormolu,
                        pretty,
                        stripe-api-gen,
                        text
