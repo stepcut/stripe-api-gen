@@ -714,6 +714,34 @@ mkTypes oa =
                  , standaloneDeriving $ [ var "Ord" @@ var "id"
                                         , var "Ord" @@ (var "ExpandsTo" @@ var "id")
                                         ] ==> (var "Ord" @@ (var "Expandable" @@ var "id"))
+                 , instance' ([ var "FromJSON" @@ var "id"
+                              , var "FromJSON" @@ (var "ExpandsTo" @@ var "id")
+                              ] ==> var "FromJSON" @@ (var "Expandable" @@ var "id"))
+                              [ funBinds "parseJSON" [ match [bvar "v"] $
+                                                       op (op  (var "Id") "<$>" (var "parseJSON" @@ var "v"))
+                                                          "<|>"
+                                                          (op (var "Expanded") "<$>" (var "parseJSON" @@ var "v"))
+                                                     ]
+                              ]
+                 , data' "TimeRange" [ bvar "a"]
+                    [ recordCon "TimeRange"
+                        [ ("gt" , field $ var "Maybe" @@ var "a")
+                        , ("gte", field $ var "Maybe" @@ var "a")
+                        , ("lt" , field $ var "Maybe" @@ var "a")
+                        , ("lte", field $ var "Maybe" @@ var "a")
+                        ]
+                    ] [ deriving' [ var "Read"
+                                  , var "Show"
+                                  , var "Eq"
+                                  , var "Ord"
+                                  , var "Data"
+                                  , var "Typeable"
+                                  ]
+                      ]
+                   -- emptyTimeRange
+                 , typeSig "emptyTimeRange" $ var "TimeRange" @@ var "a"
+                 , funBind "emptyTimeRange" $ match [] (var "TimeRange" @@ var "Nothing" @@ var "Nothing" @@ var "Nothing" @@ var "Nothing" )
+
                  ]
          modul = module' (Just "Web.Stripe.Types") exports imports decls
 
