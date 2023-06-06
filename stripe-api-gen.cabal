@@ -25,6 +25,7 @@ library
                        openapi3,
                        ormolu,
                        pretty,
+                       template-haskell,
                        text
   hs-source-dirs:      lib
   default-language:    Haskell2010
@@ -47,6 +48,7 @@ executable stripe-api-gen
                        ormolu,
                        pretty,
                        stripe-api-gen,
+                       template-haskell,
                        text
   hs-source-dirs:      src
   default-language:    Haskell2010

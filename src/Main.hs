@@ -24,6 +24,7 @@ import Data.List (sortOn, sort)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
+import Extra
 import GHC.Driver.Session (getDynFlags)
 import GHC.SourceGen
 import GHC.Paths (libdir)
@@ -41,10 +42,12 @@ import GHC.Hs.Doc (HsDoc, LHsDoc, WithHsDocIdentifiers(..))
 import GHC.Hs.DocString
 import GHC.Hs.Type (LHsType, HsType(HsDocTy))
 import GHC.Hs.Extension (GhcPs) -- Pass(Parsed), GhcPass(GhcPs))
+import GHC.Types.Basic (TopLevelFlag(TopLevel))
 import GHC.Types.SrcLoc (SrcSpan, Located, GenLocated(..), mkGeneralSrcSpan, mkRealSrcLoc)
 import GHC.Types.Fixity (LexicalFixity(Prefix))
 import GHC.Utils.Error (DiagOpts(..))
 import GHC.Utils.Outputable (defaultSDocContext)
+import Language.Haskell.TH.LanguageExtensions (Extension(DeriveDataTypeable, FlexibleContexts, FlexibleInstances, MultiParamTypeClasses, OverloadedStrings, RecordWildCards, StandaloneDeriving, TypeFamilies, UndecidableInstances))
 import Ormolu (ormolu, defaultConfig)
 import System.FilePath (splitPath)
 import Text.Casing (pascal, camel)
@@ -617,6 +620,18 @@ mkOperation path method op =
   in ((requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls)), requestTypes)
 
 
+-- | show a module. Addeds language extension pragmas, and formats with oromul.
+showModule :: FilePath -- ^ module filepath, only used in error messages
+           -> [Extension] -- ^ list of language extensions
+           -> HsModule'
+           -> IO Text
+showModule fp extensions modul =
+  do t <- runGhc (Just libdir) $
+            do dflags <- getDynFlags
+               pure $ showPpr dflags modul
+     let pragmas = T.unlines $ map (\e -> "{-# language " <> (T.pack (show e)) <> " #-}") extensions
+     ormolu defaultConfig fp (pragmas <> T.pack t)
+
 -- create Web.Stripe.Account module
 mkAccount :: OpenApi -> IO ()
 mkAccount s =
@@ -637,23 +652,80 @@ mkAccount s =
                    ]
          exports = Just (reexportTypes ++ (map var additionalExports))
          modul  = module' (Just $ "Web.Stripe.Account") exports imports opDecls
-         pragmas = [ "{-# LANGUAGE FlexibleInstances #-}"
-                   , "{-# LANGUAGE MultiParamTypeClasses #-}"
-                   , "{-# LANGUAGE OverloadedStrings #-}"
-                   , "{-# LANGUAGE TypeFamilies #-}"
-                   ]
-     t <- runGhc (Just libdir) $
-       do dflags <- getDynFlags
-          pure $ showPpr dflags modul
-     formatted <- ormolu defaultConfig "Web/Stripe/Account.hs" (T.unlines pragmas <> T.pack t)
+         extensions = [ FlexibleInstances
+                      , MultiParamTypeClasses
+                      , OverloadedStrings
+                      , TypeFamilies
+                      ]
+     formatted <- showModule "Web/Stripe/Account.hs" extensions modul
      T.putStr formatted
      pure ()
+
+
+-- create Web.Stripe.Types
+mkTypes :: OpenApi -> IO ()
+mkTypes oa =
+  do let extensions = [ DeriveDataTypeable
+                      , FlexibleContexts
+                      , OverloadedStrings
+                      , RecordWildCards
+                      , StandaloneDeriving
+                      , TypeFamilies
+                      , UndecidableInstances
+                      ]
+         imports =
+           [ import' "Control.Applicative" `exposing` [ var "pure", var "(<$>)", var "(<*>)", var "(<|>)" ]
+           , import' "Control.Monad" `exposing` [ var "mzero" ]
+           , import' "Data.Aeson" `exposing` [ thingWith "FromJSON" [ "parseJSON" ]
+                                             , thingAll "ToJSON"
+                                             , thingWith "Value" [ "String", "Object", "Bool" ]
+                                             , var "(.:)"
+                                             , var "(.:?)"
+                                             ]
+           , import' "Data.Aeson.Types" `exposing` [ var "typeMismatch" ]
+           , import' "Data.Data" `exposing` [ var "Data", var "Typeable" ]
+           , qualified' $ import' "Data.HashMap.Strict" `as'` "H"
+           , import' "Data.Ratio" `exposing` [ var "(%)" ]
+           , import' "Data.Text" `exposing` [ var "Text" ]
+           , import' "Numeric" `exposing` [ var "fromRat" , var "showFFLoat" ]
+           , import' "Text.Read" `exposing` [ var "lexP", var "pfail" ]
+           , qualified' $ import' "Text.Read" `as'` "R"
+           , import' "Web.Stripe.Util" `exposing` [ var "fromSeconds" ]
+           ]
+         exports = Nothing
+         decls = [ -- ExpandsTo
+                   family' OpenTypeFamily TopLevel "ExpandsTo" [bvar "id"] Prefix (KindSig NoExtField (hsStarTy False))
+                 , tyFamInst "ExpandsTo" [var "AccountId"] (var "Account")
+                 , data' "Expandable" [ bvar "id" ] [ prefixCon "Id" [ field $ var "id" ]
+                                                    , prefixCon "Expanded"  [field $ var "ExpandsTo" @@ var "id"]
+                                                    ] [ deriving' [ var "Typeable" ]]
+                 , standaloneDeriving $ [ var "Data" @@ var "id"
+                                        , var "Data" @@ (var "ExpandsTo" @@ var "id")
+                                        ] ==> (var "Data" @@ (var "Expandable" @@ var "id"))
+                 , standaloneDeriving $ [ var "Show" @@ var "id"
+                                        , var "Show" @@ (var "ExpandsTo" @@ var "id")
+                                        ] ==> (var "Show" @@ (var "Expandable" @@ var "id"))
+                 , standaloneDeriving $ [ var "Read" @@ var "id"
+                                        , var "Read" @@ (var "ExpandsTo" @@ var "id")
+                                        ] ==> (var "Read" @@ (var "Expandable" @@ var "id"))
+                 , standaloneDeriving $ [ var "Eq" @@ var "id"
+                                        , var "Eq" @@ (var "ExpandsTo" @@ var "id")
+                                        ] ==> (var "Eq" @@ (var "Expandable" @@ var "id"))
+                 , standaloneDeriving $ [ var "Ord" @@ var "id"
+                                        , var "Ord" @@ (var "ExpandsTo" @@ var "id")
+                                        ] ==> (var "Ord" @@ (var "Expandable" @@ var "id"))
+                 ]
+         modul = module' (Just "Web.Stripe.Types") exports imports decls
+
+     formatted <- showModule "Web/Stripe/Types.hs" extensions modul
+     T.putStr formatted
+     pure ()
+
 
 main :: IO ()
 main =
   do s <- readSpec
-
-     mkAccount s
+     mkTypes s
 {-
      let allPaths = InsOrd.toList (_openApiPaths s)
      mapM_ print (sort $ map fst allPaths)
