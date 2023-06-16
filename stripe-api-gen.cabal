@@ -16,6 +16,7 @@ library
                        bytestring,
                        casing,
                        containers,
+                       directory,
                        filepath,
                        ghc,
                        GenericPretty,
@@ -33,11 +34,13 @@ library
 
 executable stripe-api-gen
   main-is:             Main.hs
+  other-modules:       Extra
   build-depends:       aeson,
                        base >=4.12.0.0,
                        bytestring,
                        casing,
                        containers,
+                       directory,
                        filepath,
                        ghc,
                        ghc-paths,

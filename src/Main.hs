@@ -40,15 +40,17 @@ import GHC.Hs --  (XDocTy, NoExtField, Prefix, noExtField)
 import GHC.Hs.Decls
 import GHC.Hs.Doc (HsDoc, LHsDoc, WithHsDocIdentifiers(..))
 import GHC.Hs.DocString
+import GHC.Hs.Expr
 import GHC.Hs.Type (LHsType, HsType(HsDocTy))
 import GHC.Hs.Extension (GhcPs) -- Pass(Parsed), GhcPass(GhcPs))
-import GHC.Types.Basic (TopLevelFlag(TopLevel))
-import GHC.Types.SrcLoc (SrcSpan, Located, GenLocated(..), mkGeneralSrcSpan, mkRealSrcLoc)
+import GHC.Types.Basic (TopLevelFlag(TopLevel), opPrec)
+import GHC.Types.SrcLoc (SrcSpan, Located, GenLocated(..), mkGeneralSrcSpan, mkRealSrcLoc, unLoc)
 import GHC.Types.Fixity (LexicalFixity(Prefix))
 import GHC.Utils.Error (DiagOpts(..))
 import GHC.Utils.Outputable (defaultSDocContext)
 import Language.Haskell.TH.LanguageExtensions (Extension(DeriveDataTypeable, FlexibleContexts, FlexibleInstances, MultiParamTypeClasses, OverloadedStrings, RecordWildCards, StandaloneDeriving, TypeFamilies, UndecidableInstances))
 import Ormolu (ormolu, defaultConfig)
+import System.Directory (copyFile, createDirectoryIfMissing)
 import System.FilePath (splitPath)
 import Text.Casing (pascal, camel)
 import Text.PrettyPrint.GenericPretty
@@ -230,12 +232,23 @@ schemaToType' n s
         (Just [(Inline schema1), (Ref (Reference r))])
           | (_schemaType schema1) == Just OpenApiString ->
               (var "Expandable" @@ (var $ fromString $ textToPascalName (r <> "_id")), [])
-        _ -> -- TODO: if anyOf only has one field should we still use it?
-          let (Just schemas) = _schemaAnyOf s
-              (types, decls) = unzip $ map (referencedSchemaToType "FixMe7") schemas
-          in (var "OneOf" @@ listPromotedTy types, concat decls)
+        _ ->
+          case InsOrd.lookup "expansionResources" (_unDefs $ _schemaExtensions s) of
+            -- we are dealing with an expandable field
+            (Just er) ->
+              (mkNullable s $ var "Expandable" @@ (var $ fromString $ textToPascalName (n <> "_id")), [])
+            Nothing ->
+              let (Just schemas) = _schemaAnyOf s
+                  (types, decls) = unzip $ map (referencedSchemaToType "FixMe7") schemas
+              in (var "OneOf" @@ listPromotedTy types, concat decls)
 schemaToType' n s = error $ show $ (n, ppSchema s)
 -- schemaToType' _ _ = (var "FixMe", [])
+
+mkNullable :: Schema -> HsType' -> HsType'
+mkNullable s ty =
+  case _schemaNullable s of
+    (Just True) -> var "Maybe" @@ ty
+    _           -> ty
 
 textToOccName = fromString . T.unpack
 
@@ -243,6 +256,8 @@ schemaToField :: Text -> (Text, Referenced Schema) -> ((OccNameStr, Field), [HsD
 schemaToField objectName (n, Inline s)
   | n == "id" && _schemaType s == Just OpenApiString =
       ((fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ var (fromString $ textToPascalName (objectName <> "_id"))), [])
+  | _schemaType s == Just OpenApiInteger && (n `elem` ["amount", "amount_captured", "amount_refunded", "application_fee_amount"]) =
+      ((fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ var "Amount"), [])
 
 -- schemaToField _ (n , Ref _)   = ((textToOccName n, strict $ field $ var "FixMe3"), [])
 schemaToField objectName (n , Ref (Reference r))   = ((fromString $ textToCamelName(objectName <> "_" <> n), strict $ field $ var $ textToPascalName r ), [])
@@ -269,14 +284,19 @@ schemaToTypeDecls tyName s
               []
 -}
         _ ->
-          let (Just schemas) = _schemaAnyOf s
-              (types, decls) = unzip $ map (referencedSchemaToType "FixMe 6") schemas
---          decls = [] -- map schemaToTypeDecls 
-              occName   = fromString (textToPascalName tyName)
-              conName   = fromString (textToPascalName tyName)
-              unConName = fromString ("un" <> textToPascalName tyName)
-              cons = [ recordCon conName [ (unConName, strict $ field $ (var "OneOf" @@ listPromotedTy types)) ] ]
-          in (data' occName [] cons commonDeriving) : concat decls
+          case InsOrd.lookup "expansionResources" (_unDefs $ _schemaExtensions s) of
+            Nothing ->
+              let (Just schemas) = _schemaAnyOf s
+                  (types, decls) = unzip $ map (referencedSchemaToType "FixMe 6") schemas
+--          decls = [] -- map schemaToTypeDecls
+                  occName   = fromString (textToPascalName tyName)
+                  conName   = fromString (textToPascalName tyName)
+                  unConName = fromString ("un" <> textToPascalName tyName)
+                  cons = [ recordCon conName [ (unConName, strict $ field $ (var "OneOf" @@ listPromotedTy types)) ]
+                         ]
+              in (data' occName [] cons commonDeriving) : concat decls
+            (Just er) ->
+              error $ show er
   | otherwise =
       let occName = fromString (textToPascalName tyName)
 --          (fields, decls) =  unzip $ map (schemaToField (fromMaybe "FixMe2b" (_schemaTitle s))) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
@@ -332,7 +352,7 @@ ppSchemaProperty (n, s) =
 ppSchemaProperties ps =
   case InsOrd.toList ps of
     [] -> text "[]"
-    sp -> text "[" <+> (vcat (punctuate ", " (map ppSchemaProperty sp))) <+> text "]" 
+    sp -> text "[" <+> (vcat (punctuate ", " (map ppSchemaProperty sp))) <+> text "]"
 
 ppSchema :: Schema -> Doc
 ppSchema s =
@@ -374,6 +394,8 @@ ppSchema s =
    text ", _schemaUniqueItems = " <> text (show $ _schemaUniqueItems s) $$
    text ", _schemaEnum = " <> text (show $ _schemaEnum s) $$
    text ", _schemaMultipleOf = " <> text (show $ _schemaMultipleOf s) $$
+   text ", _schemaMultipleOf = " <> text (show $ _schemaMultipleOf s) $$
+   text ", _schemaExtensions = " <> text (show $ _schemaExtensions s) $$
    text "}"
    )
 
@@ -469,6 +491,12 @@ subscriptionSchema :: OpenApi -> Schema
 subscriptionSchema o =
   case InsOrd.lookup "subscription" (_componentsSchemas (_openApiComponents o)) of
     Nothing -> error "could not find subsription schema"
+    (Just s) -> s
+
+componentSchemaByName :: OpenApi -> Text -> Schema
+componentSchemaByName o n =
+  case InsOrd.lookup n (_componentsSchemas (_openApiComponents o)) of
+    Nothing -> error $ "could not find schema for " <> T.unpack n
     (Just s) -> s
 
 data Method = GET | POST | DELETE
@@ -624,13 +652,16 @@ mkOperation path method op =
 showModule :: FilePath -- ^ module filepath, only used in error messages
            -> [Extension] -- ^ list of language extensions
            -> HsModule'
+           -> Bool
            -> IO Text
-showModule fp extensions modul =
+showModule fp extensions modul o =
   do t <- runGhc (Just libdir) $
             do dflags <- getDynFlags
                pure $ showPpr dflags modul
      let pragmas = T.unlines $ map (\e -> "{-# language " <> (T.pack (show e)) <> " #-}") extensions
-     ormolu defaultConfig fp (pragmas <> T.pack t)
+     if o
+       then ormolu defaultConfig fp (pragmas <> T.pack t)
+       else pure $ (pragmas <> T.pack t)
 
 -- create Web.Stripe.Account module
 mkAccount :: OpenApi -> IO ()
@@ -657,9 +688,43 @@ mkAccount s =
                       , OverloadedStrings
                       , TypeFamilies
                       ]
-     formatted <- showModule "Web/Stripe/Account.hs" extensions modul
+     formatted <- showModule "Web/Stripe/Account.hs" extensions modul True
      T.putStr formatted
      pure ()
+
+mkFromJSON :: Text -> Schema -> HsDecl'
+mkFromJSON name s =
+  let properties = sortOn fst $ (InsOrd.toList (_schemaProperties s))
+  in instance' (var "FromJSON" @@ (var $ textToPascalName name))
+       [ funBinds "parseJSON" [ match [bvar "(Object o)"] $
+                                op' (var "Charge") "<$>" $ addAp $ map (mkJsonField name) $ properties
+                                                    ]
+       , funBinds "parseJSON" [ match [wildP] (var "mzero") ]
+       ]
+
+op' :: HsExpr' -> RdrNameStr -> HsExpr' -> HsExpr'
+op' x o y =
+  OpApp  EpAnnNotUsed (mkLocated x) (mkLocated $ var o) (mkLocated y)
+
+addAp :: [HsExpr'] -> HsExpr'
+addAp [a] = a
+addAp (a:rs) =  (op' a "<*>" (addAp rs))
+
+mkJsonField :: Text -> (Text, Referenced Schema) -> HsExpr'
+mkJsonField objName ("amount", (Inline s)) = par (op' (var "Amount") "<$>" (op (var "o") ".:"  (string "amount")))
+mkJsonField objName ("amount_refunded", (Inline s)) = par (op' (var "Amount") "<$>" (op (var "o") ".:"  (string "amount_refunded")))
+mkJsonField objName ("id", (Inline s)) = par (op' (var (textToPascalName $ objName <> "_id")) "<$>" (op (var "o") ".:"  (string "id")))
+mkJsonField _ (fieldName, (Inline s)) =
+  let oper = case _schemaNullable s of
+               (Just True) -> ".:?"
+               _           -> ".:"
+      val = case () of
+        () | (_schemaType s == Just OpenApiInteger) && (_schemaFormat s == Just "unix-time") ->
+               par $ op (var "fromSeconds") "<$>" (op (var "o") ".:" (string $ T.unpack fieldName))
+           | otherwise -> (string $ T.unpack fieldName)
+    in op' (var "o") oper val
+mkJsonField _ (fieldName, (Ref r)) =
+  op (var "o") ".:"  (string $ T.unpack fieldName)
 
 
 -- create Web.Stripe.Types
@@ -687,15 +752,17 @@ mkTypes oa =
            , qualified' $ import' "Data.HashMap.Strict" `as'` "H"
            , import' "Data.Ratio" `exposing` [ var "(%)" ]
            , import' "Data.Text" `exposing` [ var "Text" ]
-           , import' "Numeric" `exposing` [ var "fromRat" , var "showFFLoat" ]
+--           , import' "Numeric" `exposing` [ var "fromRat" , var "showFFLoat" ]
            , import' "Text.Read" `exposing` [ var "lexP", var "pfail" ]
            , qualified' $ import' "Text.Read" `as'` "R"
+           , import' "Web.Stripe.OneOf" `exposing` [ thingAll "OneOf" ]
            , import' "Web.Stripe.Util" `exposing` [ var "fromSeconds" ]
            ]
          exports = Nothing
+         charge = (componentSchemaByName oa "charge")
          decls = [ -- ExpandsTo
                    family' OpenTypeFamily TopLevel "ExpandsTo" [bvar "id"] Prefix (KindSig NoExtField (hsStarTy False))
-                 , tyFamInst "ExpandsTo" [var "AccountId"] (var "Account")
+--                 , tyFamInst "ExpandsTo" [var "AccountId"] (var "Account")
                  , data' "Expandable" [ bvar "id" ] [ prefixCon "Id" [ field $ var "id" ]
                                                     , prefixCon "Expanded"  [field $ var "ExpandsTo" @@ var "id"]
                                                     ] [ deriving' [ var "Typeable" ]]
@@ -741,18 +808,31 @@ mkTypes oa =
                    -- emptyTimeRange
                  , typeSig "emptyTimeRange" $ var "TimeRange" @@ var "a"
                  , funBind "emptyTimeRange" $ match [] (var "TimeRange" @@ var "Nothing" @@ var "Nothing" @@ var "Nothing" @@ var "Nothing" )
-
-                 ]
+                 , mkFromJSON "Charge" (componentSchemaByName oa "charge")
+                 ] ++ schemaToTypeDecls "charge" charge
          modul = module' (Just "Web.Stripe.Types") exports imports decls
 
-     formatted <- showModule "Web/Stripe/Types.hs" extensions modul
+     formatted <- showModule "Web/Stripe/Types.hs" extensions modul True
+
+
+     let decls = schemaToTypeDecls "charge" charge
+     ch <- runGhc (Just libdir) $
+            do dflags <- getDynFlags
+               pure $ showPpr dflags (head decls)
+     print $ ppSchema charge
+     print $ sort $ map fst $ InsOrd.toList $ _schemaProperties charge
+     putStr $ ch
      T.putStr formatted
+     createDirectoryIfMissing True "_generated/src/Web/Stripe"
+     T.writeFile "_generated/src/Web/Stripe/Types.hs" formatted
      pure ()
 
 
 main :: IO ()
 main =
   do s <- readSpec
+     createDirectoryIfMissing True "_generated/src/Web/Stripe"
+     copyFile "static/Web/Stripe/OneOf.hs" "_generated/src/Web/Stripe/OneOf.hs"
      mkTypes s
 {-
      let allPaths = InsOrd.toList (_openApiPaths s)
@@ -805,7 +885,7 @@ main =
 --     runGhc (Just libdir) $ putPpr $ schemaToEnumDecl "collection_method" p
      -- runGhc (Just libdir) $ putPpr typesModule
 --     runGhc (Just libdir) $ putPpr (DeclDocMap (Map.fromList [("const", mkHsDocString "const doc string")]))
----     printDoc PageMode 120 stdout 
+---     printDoc PageMode 120 stdout
      pure ()
 
 -- * Parser stuff from GHC.Parser
