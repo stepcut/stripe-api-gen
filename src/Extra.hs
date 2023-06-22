@@ -8,7 +8,7 @@ import Data.String (fromString)
 import GHC.Hs
 import GHC.Hs.Decls
 import GHC.Hs.Extension (GhcPs)
-import GHC.SourceGen.Type (HsTyVarBndr')
+import GHC.SourceGen.Type (HsTyVarBndr', HsType')
 import GHC.Types.Basic(TopLevelFlag)
 import GHC.Types.Fixity (LexicalFixity)
 import GHC.Types.SrcLoc (SrcSpan, GenLocated(L), mkGeneralSrcSpan)
@@ -107,8 +107,8 @@ mkQTyVars vars =  withPlaceHolder
 -- hsStarTy :: Bool -> LHsKind'
 hsStarTy b = mkLocated $ HsStarTy NoExtField b
 
-family' :: FamilyInfo' -> TopLevelFlag -> String -> [HsTyVarBndr'] -> LexicalFixity -> FamilyResultSig' -> HsDecl GhcPs
-family' fi tlf name vars fixity res =
+typeFamily' :: FamilyInfo' -> TopLevelFlag -> String -> [HsTyVarBndr'] -> LexicalFixity -> FamilyResultSig' -> HsDecl GhcPs
+typeFamily' fi tlf name vars fixity res =
   TyClD NoExtField $ FamDecl
           { tcdFExt = NoExtField
           , tcdFam  = FamilyDecl { fdExt       = EpAnnNotUsed
@@ -121,3 +121,18 @@ family' fi tlf name vars fixity res =
                                  , fdInjectivityAnn = Nothing
                                  }
           }
+type HsTyPats' = HsTyPats GhcPs
+
+typeInstance' :: String -> HsOuterTyVarBndrs () GhcPs -> HsTyPats' -> LexicalFixity -> HsType' -> HsDecl GhcPs
+typeInstance' conName bndrs pats fixity rhs =
+  InstD NoExtField $ TyFamInstD NoExtField $ TyFamInstDecl EpAnnNotUsed $ FamEqn
+    { feqn_ext    = EpAnnNotUsed
+    , feqn_tycon  = mkLocated $ Unqual $ mkTcOccFS $ (fromString conName)
+    , feqn_bndrs  = bndrs
+    , feqn_pats   = pats
+    , feqn_fixity = fixity
+    , feqn_rhs    = mkLocated $ rhs
+    }
+
+hsOuterImplicit :: HsOuterTyVarBndrs () GhcPs
+hsOuterImplicit = HsOuterImplicit NoExtField

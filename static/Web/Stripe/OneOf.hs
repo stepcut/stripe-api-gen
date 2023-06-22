@@ -1,21 +1,40 @@
-{-# language ConstraintKinds #-}
-{-# language DataKinds #-}
-{-# language FlexibleContexts #-}
-{-# language FlexibleInstances #-}
-{-# language GADTs #-}
-{-# language KindSignatures #-}
-{-# language MultiParamTypeClasses #-}
-{-# language PolyKinds #-}
-{-# language StandaloneDeriving #-}
-{-# language TypeOperators #-}
-{-# language TypeFamilies #-}
-{-# language UndecidableInstances #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 
 module Web.Stripe.OneOf where
 
+import Data.Data (Data)
+import Data.Kind (Type)
 import Data.Typeable (Typeable, typeOf)
 import GHC.TypeLits
-
+import Data.Aeson
+  ( FromJSON (parseJSON),
+    ToJSON (..),
+    Value (Bool, Object, String),
+    (.:),
+    (.:?),
+  )
 import Data.Proxy (Proxy(..))
 
 data MemberTest
@@ -28,15 +47,22 @@ type family IsMember x ys where
   IsMember x (y ': ys) = IsMember x ys
   IsMember x ys = IsMember x ys
 
-data OneOf (n :: [k]) where
+data OneOf (n :: [Type]) where
   Empty :: OneOf s
   Val   :: e -> OneOf (e ': s)
   NoVal :: OneOf s -> OneOf (e ': s)
 
-deriving instance Typeable k => Typeable (OneOf (n :: [k]))
+deriving instance Typeable (OneOf (n :: [Type]))
 
 instance Show (OneOf '[]) where
   show Empty = "{}"
+
+
+instance (Typeable a) => Data (OneOf a)
+instance Read (OneOf a)
+instance FromJSON (OneOf a) where
+  parseJSON _ = error "undefined"
+
 
 type family DeleteList e xs where
   DeleteList x '[] = '[]
@@ -89,3 +115,4 @@ instance {-# OVERLAPS #-} (IsMember e (f:xs) ~ 'Found, Member e xs, DeleteList e
   delete _p (Val v) = (Val v) -- :: OneOf (f ': (DeleteList e xs))
   delete p (NoVal o) = NoVal (delete p o)
   delete _p Empty = Empty
+
