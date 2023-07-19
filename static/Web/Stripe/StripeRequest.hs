@@ -109,11 +109,48 @@ data StripeRequest a = StripeRequest
 -- | convert a parameter to a key/value
 class ToStripeParam param where
   toStripeParam :: param -> [(ByteString, ByteString)] -> [(ByteString, ByteString)]
-{-
+
+instance ToStripeParam ExpandParams where
+  toStripeParam (ExpandParams params) =
+    (toExpandable params ++)
+
+instance ToStripeParam ChargeId where
+  toStripeParam (ChargeId cid) =
+    (("charge", Text.encodeUtf8 cid) :)
+
+instance ToStripeParam Created where
+  toStripeParam (Created time) =
+    (("created", toBytestring $ toSeconds time) :)
+
+instance ToStripeParam ApplicationFeeId where
+  toStripeParam (ApplicationFeeId aid) =
+    (("application_fee", Text.encodeUtf8 aid) :)
+
+instance (ToStripeParam param) => ToStripeParam (StartingAfter param) where
+  toStripeParam (StartingAfter param) =
+    case toStripeParam param [] of
+      [(_, p)] -> (("starting_after", p) :)
+      _        -> error "StartingAfter applied to non-singleton"
+
+instance (ToStripeParam param) => ToStripeParam (EndingBefore param) where
+  toStripeParam (EndingBefore param) =
+    case toStripeParam param [] of
+      [(_, p)] -> (("ending_before", p) :)
+      _        -> error "EndingBefore applied to non-singleton"
+
+instance ToStripeParam Limit where
+  toStripeParam (Limit i) =
+    (("limit", toBytestring i) :)
+
 instance ToStripeParam Amount where
   toStripeParam (Amount i) =
     (("amount", toBytestring i) :)
 
+instance ToStripeParam Metadata where
+  toStripeParam (Metadata kvs) =
+    (toMetaData kvs ++)
+
+{-
 instance ToStripeParam AmountOff where
   toStripeParam (AmountOff i) =
     (("amount_off", toBytestring i) :)
@@ -242,9 +279,6 @@ instance ToStripeParam Evidence where
   toStripeParam (Evidence txt) =
     (("evidence", Text.encodeUtf8 txt) :)
 
-instance ToStripeParam ExpandParams where
-  toStripeParam (ExpandParams params) =
-    (toExpandable params ++)
 
 instance ToStripeParam ExpMonth where
   toStripeParam (ExpMonth m) =
@@ -426,10 +460,6 @@ instance ToStripeParam TransferStatus where
 instance ToStripeParam TrialPeriodDays where
   toStripeParam (TrialPeriodDays days) =
     (("trial_period_days", toBytestring days) :)
-
-instance ToStripeParam MetaData where
-  toStripeParam (MetaData kvs) =
-    (toMetaData kvs ++)
 
 instance ToStripeParam RefundApplicationFee where
   toStripeParam (RefundApplicationFee b) =
