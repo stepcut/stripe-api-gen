@@ -336,6 +336,13 @@ schemaToType' p n s
                   | (_schemaType schema1 == Just OpenApiObject) && (_schemaEnum schema2 == Just [ Aeson.String "" ]) ->
                       let (imports, ty, decls) = schemaToType' p n schema1
                       in (imports, var "Maybe" @@ ty, decls)
+                (Just [Inline schema1, Inline schema2])
+                  | (_schemaType schema1 == Just OpenApiArray) && (_schemaEnum schema2 == Just [ Aeson.String "" ]) ->
+                      let (imports, ty, decls) = schemaToType' p n schema1
+                      in (imports, var "Maybe" @@ ty, decls)
+                (Just [Inline schema1, Inline schema2])
+                  | (_schemaType schema1 == Just OpenApiString) && (_schemaEnum schema2 == Just [ Aeson.String "" ]) ->
+                      ([], var "Maybe" @@ var "Text", [])
                 (Just [Ref (Reference r)]) ->
                   ([], (var $ fromString $ textToPascalName r), [])
                 o -> 
