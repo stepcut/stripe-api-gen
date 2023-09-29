@@ -162,8 +162,6 @@ readSpec =
        Nothing -> error "could not decode' spec3.sdk.json"
        (Just o) -> pure o
 
-
-
 replace :: Char -> Char -> String -> String
 replace orig new = map (\c -> if (c == orig) then new  else c)
 
@@ -297,7 +295,10 @@ schemaToType' p n s
         Just (OpenApiItemsObject (Ref (Reference r))) ->
           ([textToPascalName r], var "StripeList" @@ (var $ textToPascalName r), [])
         Just (OpenApiItemsObject (Inline s)) ->
-          let (imports, ty, decls) = schemaToType' "FixMe4a" "FixMe4b" s
+          let name = case _schemaTitle s of
+                (Just t) -> t
+                Nothing  -> "FixMe4b"
+              (imports, ty, decls) = schemaToType' "FixMe4a" name s
           in (imports, var "StripeList" @@ ty, decls)
         Nothing -> ([], var "FixMeOpenApiItemsObject", [])
   | (_schemaType s == Just OpenApiObject) =
@@ -335,17 +336,17 @@ schemaToType' p n s
                 (Just [Inline schema1, Inline schema2])
                   | (_schemaType schema1 == Just OpenApiObject) && (_schemaEnum schema2 == Just [ Aeson.String "" ]) ->
                       let (imports, ty, decls) = schemaToType' p n schema1
-                      in (imports, var "Maybe" @@ ty, decls)
+                      in (imports, var "Emptyable" @@ ty, decls)
                 (Just [Inline schema1, Inline schema2])
                   | (_schemaType schema1 == Just OpenApiArray) && (_schemaEnum schema2 == Just [ Aeson.String "" ]) ->
                       let (imports, ty, decls) = schemaToType' p n schema1
-                      in (imports, var "Maybe" @@ ty, decls)
+                      in (imports, var "Emptyable" @@ ty, decls)
                 (Just [Inline schema1, Inline schema2])
                   | (_schemaType schema1 == Just OpenApiString) && (_schemaEnum schema2 == Just [ Aeson.String "" ]) ->
-                      ([], var "Maybe" @@ var "Text", [])
+                      ([], var "Emptyable" @@ var "Text", [])
                 (Just [Ref (Reference r)]) ->
                   ([], (var $ fromString $ textToPascalName r), [])
-                o -> 
+                o ->
                   let (Just schemas) = _schemaAnyOf s
                       (imports, types, decls) = unzip3 $ map (referencedSchemaToType p "FixMe7") schemas
                   in (concat imports, var "OneOfX" @@ listPromotedTy types, concat decls)
@@ -361,20 +362,25 @@ mkNullable s ty =
 
 textToOccName = fromString . T.unpack
 
-schemaToField :: Text -> (Text, Referenced Schema) -> ([RdrNameStr], (OccNameStr, Field), [HsDecl'])
-schemaToField objectName (n, Inline s)
+mkRequired :: (Var a, App a) => Bool -> a -> a
+mkRequired True a = a
+mkRequired False a = var "Maybe" @@ a
+
+-- when do we use _schemaNullable and when do we use _schemaRequired?
+schemaToField :: [ParamName] -> Text -> (Text, Referenced Schema) -> ([RdrNameStr], (OccNameStr, Field), [HsDecl'])
+schemaToField required objectName (n, Inline s)
   | n == "id" && _schemaType s == Just OpenApiString =
-      ([], (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ var (fromString $ textToPascalName (objectName <> "_id"))), [])
+      ([], (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ var (fromString $ textToPascalName (objectName <> "_id"))), [])
   | _schemaType s == Just OpenApiInteger && (n `elem` ["amount", "amount_captured", "amount_refunded", "application_fee_amount"]) =
       let ty = case _schemaNullable s of
                  (Just True) -> var "Maybe" @@ var "Amount"
                  _           -> var "Amount"
       in ([], (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ ty), [])
 -- schemaToField _ (n , Ref _)   = ((textToOccName n, strict $ field $ var "FixMe3"), [])
-schemaToField objectName (n , Ref (Reference r))   = ([], (fromString $ textToCamelName(objectName <> "_" <> n), strict $ field $ var $ textToPascalName r ), [])
-schemaToField objectName (n, Inline s) =
+schemaToField required objectName (n , Ref (Reference r))   = ([], (fromString $ textToCamelName(objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ var $ textToPascalName r ), [])
+schemaToField required objectName (n, Inline s) =
   let (imports, ty, decls) = schemaToType objectName n s
-  in (imports, (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field ty) , decls)
+  in (imports, (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ ty) , decls)
 
 {- check for stuff like this,
 
@@ -394,12 +400,25 @@ schemaToField objectName (n, Inline s) =
      },
 
 -}
-isMaybeString :: Schema -> Bool
-isMaybeString s =
+isEmptyableString :: Schema -> Bool
+isEmptyableString s =
   case _schemaAnyOf s of
     (Just [Inline schema1, Inline schema2]) ->
       (_schemaType schema1 == Just OpenApiString) && (_schemaEnum schema2 == Just [ Aeson.String "" ])
     _ -> False
+
+
+isEmptyable :: Schema -> Bool
+isEmptyable s =
+  case _schemaAnyOf s of
+    (Just [Inline schema1, Inline schema2]) ->
+      (_schemaEnum schema2 == Just [ Aeson.String "" ])
+    _ -> False
+
+isEmptyEnum :: Schema -> Bool
+isEmptyEnum schema =
+  (_schemaEnum schema == Just [ Aeson.String "" ])
+
 
 mkNewtypeParam tyName wrappedType =
   let occName   = fromString (textToPascalName tyName)
@@ -407,6 +426,20 @@ mkNewtypeParam tyName wrappedType =
       unConName = fromString ("un" <> textToPascalName tyName)
       con       = recordCon occName [ ( unConName, strict $ field $ wrappedType) ]
   in [ newtype' occName [] con derivingCommon ]
+
+mkSumType :: Text -> [Referenced Schema] -> [HsDecl']
+mkSumType tyName schemas =
+  let occName   = fromString (textToPascalName tyName)
+      (cons, decls) = unzip $ map mkCon schemas
+--      conName   = fromString (textToPascalName tyName)
+--      unConName = fromString ("un" <> textToPascalName tyName)
+--      con       = recordCon occName [ ( unConName, strict $ field $ wrappedType) ]
+  in (data' occName [] cons derivingCommon) : concat decls
+  where
+    mkCon (Ref (Reference r)) =
+      let conName = fromString (textToPascalName r)
+      in (prefixCon conName [], [])
+--  error $ (T.unpack $ "tyName = " <> tyName <> " , schemas = ") <> show schemas
 
 schemaToTypeDecls :: Text -> Text -> Schema -> [HsDecl']
 schemaToTypeDecls objName tyName s
@@ -431,14 +464,14 @@ schemaToTypeDecls objName tyName s
                 _ -> error "could not default_tax_rates: was expecting an array of strings but something does not match."
         _  -> error "default_tax_rates specification does not match expectations. The spec must have been updated."
   | tyName == "on_behalf_of" =
-      case isMaybeString s of
+      case isEmptyableString s of
         False -> error "expected on_behalf_of to be a Maybe String. Perhaps the specification has changed?"
-        True -> mkNewtypeParam tyName (var "Maybe" @@ var "AccountId")
+        True -> mkNewtypeParam tyName (var "Emptyable" @@ var "AccountId")
 
   | tyName == "default_tax_rate" =
-      case isMaybeString s of
+      case isEmptyableString s of
         False -> error "expected default_tax_rate to be a Maybe String. Perhaps the specification has changed?"
-        True -> mkNewtypeParam tyName (var "Maybe" @@ var "AccountId")
+        True -> mkNewtypeParam tyName (var "Emptyable" @@ var "AccountId")
 
   | _schemaType s == Just OpenApiString =
       [] -- (snd $ schemaToEnumDecl objName tyName s)
@@ -465,6 +498,14 @@ schemaToTypeDecls objName tyName s
         _ ->
           case InsOrd.lookup "expansionResources" (_unDefs $ _schemaExtensions s) of
             Nothing ->
+              case _schemaAnyOf s of
+                (Just [Inline schema1, Inline schema2])
+                  | isEmptyEnum schema2 ->
+                      schemaToTypeDecls "NoObjectName" tyName schema1
+                (Just schemas) ->
+                  mkSumType tyName schemas -- 
+{-
+            Nothing ->
               let (Just schemas) = _schemaAnyOf s
                   (imports, types, decls) = unzip3 $ map (referencedSchemaToType objName "FixMe6") schemas
 --          decls = [] -- map schemaToTypeDecls
@@ -474,6 +515,7 @@ schemaToTypeDecls objName tyName s
                   cons = [ recordCon conName [ (unConName, strict $ field $ (var "OneOf" @@ listPromotedTy types)) ]
                          ]
               in (data' occName [] cons derivingCommon : mkFromJSON objName s : [] {- :  concat decls -} )
+-}
             (Just er) ->
               error $ show er
 
@@ -515,7 +557,7 @@ schemaToTypeDecls objName tyName s
                           Nothing  -> error $ "schemaToTypeDecls - could not find schemaTitle for " ++ show (ppSchema s)
               entryTyName = textToPascalName entryTy
 --              (imports, fields, decls) =  unzip $ map (schemaToField (fromMaybe "FixMe2b" (_schemaTitle s))) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
-              (entryImports, entryFields, entryDecls) =  unzip3 $ map (schemaToField tyName) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
+              (entryImports, entryFields, entryDecls) =  unzip3 $ map (schemaToField (_schemaRequired s) tyName) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
               entryCon = recordCon entryTyName entryFields
               entryDecl = data' entryTyName [] [entryCon] derivingCommon
 
@@ -534,15 +576,18 @@ schemaToTypeDecls objName tyName s
         Nothing -> ([], var "schemaToTypeDecls - FixMeOpenApiItemsObject", [])
 -}
   | otherwise =
-      let occName = fromString (textToPascalName $ tyName)
+      let name = tyName
+          occName = fromString (textToPascalName name)
 --          (fields, decls) =  unzip $ map (schemaToField (fromMaybe "FixMe2b" (_schemaTitle s))) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
-          (imports, fields, decls) =  unzip3 $ map (schemaToField tyName) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
+          (imports, fields, decls) =  unzip3 $ map (schemaToField (_schemaRequired s) name) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
           con = recordCon occName fields
       in (data' occName [] [con] derivingCommon)  : concat decls
 {-
   | otherwise = error $ "schemaToTypeDecls: " ++ show (tyName, ppSchema s)
 -}
 
+isRequired :: Schema -> ParamName -> Bool
+isRequired s p = p `elem` (_schemaRequired s)
 
 referencedParamToDecl :: Referenced Param -> HsDecl'
 referencedParamToDecl (Inline p) =
@@ -837,7 +882,7 @@ mkPaths oa paths modBaseName =
   do let (opDecls, reexportTypes, additionalExports) = unzip3Concat $ map (mkPath oa) paths
          requestBodyProperties =
            concatMap findPropertiesInPathItems (lookupPaths (_openApiPaths oa) paths)
-         propDecls = concatMap (uncurry (schemaToTypeDecls "foo")) ([ (t, s) | (t, Inline s) <- requestBodyProperties ])
+         propDecls = concatMap (uncurry (schemaToTypeDecls "FixMeMkPaths")) ([ (t, s) | (t, Inline s) <- requestBodyProperties ])
          exports = Just (nub $ reexportTypes ++ (map var (additionalExports)))
          imports = [ import' "Web.Stripe.StripeRequest" `exposing`
                      [ thingAll "Method"
@@ -1024,7 +1069,7 @@ mkTypes oa =
                                              , var "(.:?)"
                                              ]
            , import' "Data.Aeson.Types" `exposing` [ var "typeMismatch" ]
-           , import' "Data.Data" `exposing` [ var "Data", var "Typeable" ]
+           , import' "Data.Data"  `exposing` [ var "Data", var "Typeable" ]
            , qualified' $ import' "Data.HashMap.Strict" `as'` "H"
            , import' "Data.Map"   `exposing` [ var "Map" ]
            , import' "Data.Ratio" `exposing` [ var "(%)" ]
@@ -1034,7 +1079,7 @@ mkTypes oa =
            , import' "Text.Read"  `exposing` [ var "lexP", var "pfail" ]
            , qualified' $ import' "Text.Read" `as'` "R"
            , import' "Web.Stripe.OneOf" `exposing` [ thingAll "OneOf" ]
-           , import' "Web.Stripe.Util" `exposing` [ var "fromSeconds" ]
+           , import' "Web.Stripe.Util"  `exposing` [ var "fromSeconds" ]
            ]
          exports = Nothing
 -- charge         charge = (componentSchemaByName oa "charge")
