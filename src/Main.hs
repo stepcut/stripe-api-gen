@@ -14,6 +14,7 @@ import Control.Monad.State (State, evalState)
 import Data.Aeson (decode')
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
+import Data.Char (isUpper)
 import Data.Function (on)
 import           Data.Map (Map)
 import qualified Data.Map as Map
@@ -54,7 +55,7 @@ import GHC.Types.SrcLoc (SrcSpan, Located, GenLocated(..), mkGeneralSrcSpan, mkR
 import GHC.Types.Fixity (LexicalFixity(Prefix))
 import GHC.Utils.Error (DiagOpts(..))
 import GHC.Utils.Outputable (defaultSDocContext)
-import Language.Haskell.TH.LanguageExtensions (Extension(DataKinds, DeriveDataTypeable, FlexibleContexts, FlexibleInstances, MultiParamTypeClasses, OverloadedStrings, RecordWildCards, StandaloneDeriving, TypeFamilies, UndecidableInstances))
+import Language.Haskell.TH.LanguageExtensions (Extension(DataKinds, DeriveDataTypeable, FlexibleContexts, FlexibleInstances, MultiParamTypeClasses, OverlappingInstances, OverloadedStrings, RecordWildCards, StandaloneDeriving, TypeFamilies, UndecidableInstances))
 import Ormolu (ormolu, defaultConfig)
 import Pretty
 import System.Directory (copyFile, createDirectoryIfMissing)
@@ -349,7 +350,7 @@ schemaToType' p n s
                 o ->
                   let (Just schemas) = _schemaAnyOf s
                       (imports, types, decls) = unzip3 $ map (referencedSchemaToType p "FixMe7") schemas
-                  in (concat imports, var "OneOfX" @@ listPromotedTy types, concat decls)
+                  in (concat imports, var "OneOf" @@ listPromotedTy types, concat decls)
 
 schemaToType' p n s = error $ show $ (n, ppSchema s)
 -- schemaToType' _ _ = (var "FixMe", [])
@@ -427,6 +428,8 @@ mkNewtypeParam tyName wrappedType =
       con       = recordCon occName [ ( unConName, strict $ field $ wrappedType) ]
   in [ newtype' occName [] con derivingCommon ]
 
+
+-- FIXME: we have to add a unique prefix to each sum type. But that just seems to make things more annoying for the user? Maybe we should just use OneOf? The user of this library is passing the values in, not trying to figure out which instance it actually is?
 mkSumType :: Text -> [Referenced Schema] -> [HsDecl']
 mkSumType tyName schemas =
   let occName   = fromString (textToPascalName tyName)
@@ -437,14 +440,16 @@ mkSumType tyName schemas =
   in (data' occName [] cons derivingCommon) : concat decls
   where
     mkCon (Ref (Reference r)) =
-      let conName = fromString (textToPascalName r)
-      in (prefixCon conName [], [])
+      let conName = fromString (prefix <> textToPascalName r)
+          fld     = strict $ field $ var $ fromString (prefix <> textToPascalName r)
+      in (prefixCon conName [fld], [])
+    prefix = filter isUpper (textToPascalName tyName)
 --  error $ (T.unpack $ "tyName = " <> tyName <> " , schemas = ") <> show schemas
 
 schemaToTypeDecls :: Text -> Text -> Schema -> [HsDecl']
 schemaToTypeDecls objName tyName s
   -- types which are manually defined in Types
-  | tyName `elem` [ "expand", "items", "metadata" ] = []
+  | tyName `elem` [ "expand", "metadata" ] = []
   | tyName `elem` ["lines", "line_items", "use_stripe_sdk", "refunds", "customer_id", "automatic_tax", "currency"] = []
   | tyName == "default_tax_rates" =
       -- FIXME: The docs says  'Pass an empty string to remove previously-defined tax rates'. Does passing an empty list do that? 
@@ -503,7 +508,15 @@ schemaToTypeDecls objName tyName s
                   | isEmptyEnum schema2 ->
                       schemaToTypeDecls "NoObjectName" tyName schema1
                 (Just schemas) ->
-                  mkSumType tyName schemas -- 
+--                  mkSumType tyName schemas --
+                  let (imports, types, decls) = unzip3 $ map (referencedSchemaToType objName "FixMe6") schemas
+                      occName   = fromString (textToPascalName tyName)
+                      conName   = fromString (textToPascalName tyName)
+                      unConName = fromString ("un" <> textToPascalName tyName)
+                      cons = [ recordCon conName [ (unConName, strict $ field $ (var "OneOf" @@ listPromotedTy types)) ]
+                             ]
+                  in (data' occName [] cons derivingCommon : mkFromJSON objName s : [] {- :  concat decls -} )
+
 {-
             Nothing ->
               let (Just schemas) = _schemaAnyOf s
@@ -1053,6 +1066,7 @@ mkTypes oa =
   do let extensions = [ DataKinds
                       , DeriveDataTypeable
                       , FlexibleContexts
+                      , OverlappingInstances
                       , OverloadedStrings
                       , RecordWildCards
                       , StandaloneDeriving
@@ -1114,7 +1128,19 @@ mkTypes oa =
                  , standaloneDeriving $ [ var "Ord" @@ var "id"
                                         , var "Ord" @@ (var "ExpandsTo" @@ var "id")
                                         ] ==> (var "Ord" @@ (var "Expandable" @@ var "id"))
-                 , instance' ([ var "FromJSON" @@ var "id"
+                 ] ++
+--                 [ standaloneDeriving $ (var cls @@ (var "Expandable" @@ (var "OneOf" @@ listPromotedTy []))) | cls <- [ "Eq", "Data", "Ord", "Read", "Show"] ] ++
+--                 [ standaloneDeriving $ [ var cls @@ var "a", var cls  @@ (var "ExpandsTo" @@ (var "OneOf" @@ var "a"))] ==> (var cls @@ (var "Expandable" @@ (var "OneOf" @@ var "a" ))) | cls <- [ "Eq", "Data", "Ord", "Read", "Show"] ] ++
+--                 [ standaloneDeriving $  var cls @@ (var "Expandable" @@ (var "OneOf" @@ (op (var "a") ":" (var "as") ))) | cls <- [ "Eq", "Data", "Ord", "Read", "Show"] ] ++
+{-                 [ instance' (var cls @@ (var "Expandable" @@ (var "OneOf" @@ (op (var "a") ":" (var "as") )))) []
+                      | cls <- [ "Eq", "Data", "Ord", "Read", "Show"
+                               ]
+                      ] ++-}
+                 [ instance' ([var "Typeable" @@ var "a" ] ==> var cls @@ (var "Expandable" @@ (var "OneOf" @@  var "a"))) []
+                      | cls <- [ "Eq", "Data", "Ord", "Read", "Show"
+                               ]
+                      ] ++
+                 [ instance' ([ var "FromJSON" @@ var "id"
                               , var "FromJSON" @@ (var "ExpandsTo" @@ var "id")
                               ] ==> var "FromJSON" @@ (var "Expandable" @@ var "id"))
                               [ funBinds "parseJSON" [ match [bvar "v"] $
@@ -1164,6 +1190,11 @@ mkTypes oa =
                        , ("linesHasMore", field $ var "Bool")
                        ]
                     ]  derivingCommon
+                 , type' "PaymentSourceId" [] (var "OneOf" @@ listPromotedTy [ var "AccountId"
+                                                                             ] )
+                 , type' "BalanceTransactionSourceId" [] (var "OneOf" @@ listPromotedTy
+                                                                             [ var "ApplicationFeeId"
+                                                                             ] )
                  ] ++  map mkTimeNewtype timeNewtypes ++
                  [ {- data' "Currency" []
                     [ prefixCon "USD" [] -- FIXME, calculate entire list
@@ -1184,8 +1215,9 @@ mkTypes oa =
                  ] ++
                  mkEnums (findEnums oa) ++
                  concatMap mkId (findIds oa) ++
-                 concatMap mkObject (InsOrd.toList cs) -- ++
---                 concatMap mkParam (findParams oa)
+                 concatMap mkObject (InsOrd.toList cs) ++
+--                 concatMap mkParam (findParams oa) ++
+                 []
 --                 concatMap (uncurry (schemaToTypeDecls "foo")) ([ (t, s) | (t, Inline s) <- findRequestBodyProperties oa ])
 
          modul = module' (Just "Web.Stripe.Types") exports imports decls
