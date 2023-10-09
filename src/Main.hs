@@ -23,7 +23,7 @@ import qualified Data.Set as Set
 import qualified Data.HashMap.Strict.InsOrd as InsOrd
 import Data.HashMap.Strict.InsOrd (InsOrdHashMap)
 import Data.Maybe (fromJust, isJust, fromMaybe)
-import Data.OpenApi
+import Data.OpenApi hiding (trace)
 import Data.String (IsString(fromString))
 import Data.List (nub, nubBy, sortOn, sort)
 import  Data.List.NonEmpty (NonEmpty((:|)))
@@ -31,6 +31,7 @@ import qualified Data.List.NonEmpty as NonEmpty
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
+import Debug.Trace (trace)
 import Extra
 import GHC.Driver.Session (getDynFlags)
 import GHC.SourceGen
@@ -262,7 +263,10 @@ It is not clear if you can mix properties and additionalProperties.
 
 -}
 
-schemaToType' :: Text -> Text -> Schema -> ([RdrNameStr], HsType', [HsDecl'])
+schemaToType' :: Text
+              -> Text
+              -> Schema
+              -> ([RdrNameStr], HsType', [HsDecl']) -- ^ 
 schemaToType' p n s
   | n == "type" = ([], var "StripeType", [])
   | (_schemaType s == Just OpenApiInteger) && (_schemaFormat s == Just "unix-time") =
@@ -290,6 +294,13 @@ schemaToType' p n s
                   , Aeson.String "pending"
                   ]
                -> ([], var $ "Status", []) -- schemaToEnumDecl p n s
+             (Just enums) ->
+               ([], (var $ textToPascalName n), mkEnums (Map.singleton n (Set.fromList [ s | Aeson.String s <- enums ])))
+{-                       
+               [ data' (textToPascalName typeNm) [] [ mkCon typeNm c | c <- Set.toList conNms ] derivingCommon
+               , instance' (var "FromJSON" @@ (var $ textToPascalName typeNm)) [ funBinds "parseJSON" [ match []  (var "undefined")] ]
+               ]
+-}
              _       -> ([], var $ textToPascalName n, []) -- schemaToEnumDecl p n s
   | (_schemaType s == Just OpenApiArray) =
       case _schemaItems s of
@@ -380,8 +391,11 @@ schemaToField required objectName (n, Inline s)
 -- schemaToField _ (n , Ref _)   = ((textToOccName n, strict $ field $ var "FixMe3"), [])
 schemaToField required objectName (n , Ref (Reference r))   = ([], (fromString $ textToCamelName(objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ var $ textToPascalName r ), [])
 schemaToField required objectName (n, Inline s) =
-  let (imports, ty, decls) = schemaToType objectName n s
-  in (imports, (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ ty) , decls)
+   let (imports, ty, decls) = schemaToType objectName n s
+   in (if (n == "amount_tax_display")
+        then (trace ("schemaToField" ++ show (ppSchema s)))
+        else id) $
+     (imports, (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ ty) , decls)
 
 {- check for stuff like this,
 
@@ -896,15 +910,17 @@ mkPaths oa paths modBaseName =
          requestBodyProperties =
            concatMap findPropertiesInPathItems (lookupPaths (_openApiPaths oa) paths)
          propDecls = concatMap (uncurry (schemaToTypeDecls "FixMeMkPaths")) ([ (t, s) | (t, Inline s) <- requestBodyProperties ])
-         exports = Just (nub $ reexportTypes ++ (map var (additionalExports)))
-         imports = [ import' "Web.Stripe.StripeRequest" `exposing`
+         exports = Just (nub $ {- reexportTypes ++ -} (map var (additionalExports)))
+         imports = [ import' "Data.Data" `exposing` [ var "Data" ]
+                   , import' "Data.Text" `exposing` [ var "Text" ]
+                   , import' "Web.Stripe.StripeRequest" `exposing`
                      [ thingAll "Method"
                      , thingWith "StripeHasParam" []
                      , thingAll "StripeRequest"
                      , var "StripeReturn"
                      , var "mkStripeRequest"
                      ]
-                   , import' "Web.Stripe.Types" `exposing` (thingAll "StripeList" : thingAll "StartingAfter": thingAll "EndingBefore" :  (nub reexportTypes))
+                   , import' "Web.Stripe.Types" `exposing` (thingAll "Emptyable" : thingAll "ExpandParams" : thingAll "Metadata" : thingAll "StripeList" : thingAll "StartingAfter": thingAll "EndingBefore" : thingAll "Limit" : [] {- (nub reexportTypes) -} )
                    , import' "Web.Stripe.Util" `exposing` [var "(</>)"]
                    ]
          modul  = module' (Just $ fromString $ "Web.Stripe." <> foldr1 (\a b -> a <> "." <> b) modBaseName) exports imports (opDecls ++ propDecls)
@@ -968,8 +984,8 @@ mkPath' oa method (path, idName) =
         (Just op) ->
           let (opDecls, reexports, additionalExports) = mkOperation path method idName op
               reexportTypes = map thingAll (nub reexports)
-              exports = Just (reexportTypes ++ (map var additionalExports))
-          in (opDecls, reexportTypes, additionalExports)
+--              exports = Just ({- reexportTypes ++ -} (map var additionalExports))
+          in (opDecls, reexportTypes, additionalExports)  -- FIXME: we used to define all the types in Web.Stripe.Types, but now some are defined locally
 
 
 {-
@@ -1190,6 +1206,10 @@ mkTypes oa =
                        , ("linesHasMore", field $ var "Bool")
                        ]
                     ]  derivingCommon
+                 , data' "Emptyable" [ bvar "a" ]
+                    [ prefixCon "Full"  [ strict $ field $ var "a" ]
+                    , prefixCon "Empty" []
+                    ] derivingCommon
                  , type' "PaymentSourceId" [] (var "OneOf" @@ listPromotedTy [ var "AccountId"
                                                                              ] )
                  , type' "BalanceTransactionSourceId" [] (var "OneOf" @@ listPromotedTy
@@ -1355,6 +1375,8 @@ mkEnums (Map.toList -> enums) = concatMap mkEnum $ {- filter (\(t,c) -> not $ "_
       prefixCon (textToPascalName ("prefered_language_" <> conName)) []
     mkCon t@"allowed_countries" conName =
       prefixCon (textToPascalName (t <> "_" <> conName)) []
+    mkCon tyName "" =
+      prefixCon (textToPascalName (tyName <> "_empty")) []
     mkCon tyName conName
       | conName `elem` ["active", "auto", "automatic", "checking", "savings", "void", "unpaid", "restricted", "under_review", "paid", "redacted", "lost", "expired", "failed", "canceled", "completed", "ip_address", "stolen", "manual", "fraudulent", "duplicate", "if_required", "sporadic", "exempt", "none",  "inactive", "other", "pending", "required", "reverse", "bank_account_restricted", "debit_not_authorized", "insufficient_funds", "requested_by_customer", "abandoned", "in_progress", "not_collecting", "not_supported", "reverse_charge", "accepted","company","individual", "savings", "other", "checking", "restricted", "unpaid", "credit", "requirements_past_due", "match", "mismatch", "not_provided", "account_closed", "account_frozen", "country", "cancel", "unknown", "unrestricted", "always", "customer_exempt", "issuing_authorization", "shipping", "source", "card", "id", "subscription", "customer_id", "string", "tax_id", "instant", "link", "zengin", "us_domestic_wire", "spei", "sepa", "ach", "payment_method", "standard", "blik", "unused", "too_expensive", "too_complex", "switched_service", "missing_features", "low_quality", "customer_service", "verification_method_instant", "us_bank_account", "supported_payment_method_types_link", "supported_networks_zengin", "supported_networks_us_domestic_wire", "supported_networks_spei", "supported_networks_ach", "payment_method", "service_standard", "payment_method_types_blik", "options_used", "options_too_expensive", "options_too_complex", "options_switched_service", "options_missing_features", "options_low_quality", "options_customer_service", "email", "price", "address", "invoice", "promotion_code", "rule", "dispute_evidence", "bank_transfer"] =
           prefixCon (textToPascalName (tyName <> "_" <> conName)) []
