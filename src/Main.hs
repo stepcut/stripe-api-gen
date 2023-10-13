@@ -35,6 +35,7 @@ import Debug.Trace (trace)
 import Extra
 import GHC.Driver.Session (getDynFlags)
 import GHC.SourceGen
+import GHC.SourceGen.Name (RdrNameStr, rdrNameStrToString)
 import GHC.Paths (libdir)
 import GHC (runGhc, noLoc)
 import GHC.Data.FastString(mkFastString)
@@ -266,9 +267,9 @@ It is not clear if you can mix properties and additionalProperties.
 schemaToType' :: Text
               -> Text
               -> Schema
-              -> ([RdrNameStr], HsType', [HsDecl']) -- ^ 
+              -> ([RdrNameStr], HsType', [HsDecl']) -- ^
 schemaToType' p n s
-  | n == "type" = ([], var "StripeType", [])
+--  | n == "type" = ([], var "StripeType", [])
   | (_schemaType s == Just OpenApiInteger) && (_schemaFormat s == Just "unix-time") =
       ([], var "UTCTime", [])
   | (_schemaType s == Just OpenApiInteger) =
@@ -296,7 +297,7 @@ schemaToType' p n s
                -> ([], var $ "Status", []) -- schemaToEnumDecl p n s
              (Just enums) ->
                ([], (var $ textToPascalName n), mkEnums (Map.singleton n (Set.fromList [ s | Aeson.String s <- enums ])))
-{-                       
+{-
                [ data' (textToPascalName typeNm) [] [ mkCon typeNm c | c <- Set.toList conNms ] derivingCommon
                , instance' (var "FromJSON" @@ (var $ textToPascalName typeNm)) [ funBinds "parseJSON" [ match []  (var "undefined")] ]
                ]
@@ -309,7 +310,7 @@ schemaToType' p n s
         Just (OpenApiItemsObject (Inline s)) ->
           let name = case _schemaTitle s of
                 (Just t) -> t
-                Nothing  -> "FixMe4b"
+                Nothing  -> n
               (imports, ty, decls) = schemaToType' "FixMe4a" name s
           in (imports, var "StripeList" @@ ty, decls)
         Nothing -> ([], var "FixMeOpenApiItemsObject", [])
@@ -332,17 +333,18 @@ schemaToType' p n s
                 Nothing -> error "Expected 'lines' to have a data property"
 
             _ ->
-              ([], var (fromString $ textToPascalName n), schemaToTypeDecls p n s)
+              let (imports, decls) = schemaToTypeDecls p n s
+              in (imports, var (fromString $ textToPascalName n), decls)
   | isJust (_schemaAnyOf s) =
       case _schemaAnyOf s of
         (Just [(Inline schema1), (Ref (Reference r))])
           | (_schemaType schema1) == Just OpenApiString ->
-              ([], var "Expandable" @@ (var $ fromString $ textToPascalName (r <> "_id")), [])
+              ([textToPascalName r], var "Expandable" @@ (var $ fromString $ textToPascalName (r <> "_id")), [])
         _ ->
           case InsOrd.lookup "expansionResources" (_unDefs $ _schemaExtensions s) of
             -- we are dealing with an expandable field
             (Just er) | not (n `elem` ["default_source", "destination"]) -> -- FIXME: the problem here is that the ID can expand to one of several fields
-              ([], var "Expandable" @@ (var $ fromString $ textToPascalName (n <> "_id")), [])
+              ([textToPascalName n], var "Expandable" @@ (var $ fromString $ textToPascalName (n <> "_id")), [])
             _ ->
               case _schemaAnyOf s of
                 (Just [Inline schema1, Inline schema2])
@@ -357,7 +359,7 @@ schemaToType' p n s
                   | (_schemaType schema1 == Just OpenApiString) && (_schemaEnum schema2 == Just [ Aeson.String "" ]) ->
                       ([], var "Emptyable" @@ var "Text", [])
                 (Just [Ref (Reference r)]) ->
-                  ([], (var $ fromString $ textToPascalName r), [])
+                  ([textToPascalName r], (var $ fromString $ textToPascalName r), [])
                 o ->
                   let (Just schemas) = _schemaAnyOf s
                       (imports, types, decls) = unzip3 $ map (referencedSchemaToType p "FixMe7") schemas
@@ -389,7 +391,8 @@ schemaToField required objectName (n, Inline s)
                  _           -> var "Amount"
       in ([], (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ ty), [])
 -- schemaToField _ (n , Ref _)   = ((textToOccName n, strict $ field $ var "FixMe3"), [])
-schemaToField required objectName (n , Ref (Reference r))   = ([], (fromString $ textToCamelName(objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ var $ textToPascalName r ), [])
+schemaToField required objectName (n , Ref (Reference r))   =
+  ([textToPascalName r], (fromString $ textToCamelName(objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ var $ textToPascalName r ), [])
 schemaToField required objectName (n, Inline s) =
    let (imports, ty, decls) = schemaToType objectName n s
    in (if (n == "amount_tax_display")
@@ -440,7 +443,7 @@ mkNewtypeParam tyName wrappedType =
       conName   = fromString (textToPascalName tyName)
       unConName = fromString ("un" <> textToPascalName tyName)
       con       = recordCon occName [ ( unConName, strict $ field $ wrappedType) ]
-  in [ newtype' occName [] con derivingCommon ]
+  in ([], [ newtype' occName [] con derivingCommon ])
 
 
 -- FIXME: we have to add a unique prefix to each sum type. But that just seems to make things more annoying for the user? Maybe we should just use OneOf? The user of this library is passing the values in, not trying to figure out which instance it actually is?
@@ -460,13 +463,13 @@ mkSumType tyName schemas =
     prefix = filter isUpper (textToPascalName tyName)
 --  error $ (T.unpack $ "tyName = " <> tyName <> " , schemas = ") <> show schemas
 
-schemaToTypeDecls :: Text -> Text -> Schema -> [HsDecl']
+schemaToTypeDecls :: Text -> Text -> Schema -> ([RdrNameStr], [HsDecl'])
 schemaToTypeDecls objName tyName s
   -- types which are manually defined in Types
-  | tyName `elem` [ "expand", "metadata" ] = []
-  | tyName `elem` ["lines", "line_items", "use_stripe_sdk", "refunds", "customer_id", "automatic_tax", "currency"] = []
+  | tyName `elem` [ "expand", "metadata" ] = ([], [])
+  | tyName `elem` ["lines", "line_items", "use_stripe_sdk", "refunds", "customer_id", "automatic_tax", "currency"] = ([], [])
   | tyName == "default_tax_rates" =
-      -- FIXME: The docs says  'Pass an empty string to remove previously-defined tax rates'. Does passing an empty list do that? 
+      -- FIXME: The docs says  'Pass an empty string to remove previously-defined tax rates'. Does passing an empty list do that?
       case _schemaAnyOf s of
         (Just [Inline schema1, Inline schema2])
           | _schemaEnum schema2 == Just [ Aeson.String "" ] &&
@@ -478,7 +481,7 @@ schemaToTypeDecls objName tyName s
                         conName   = fromString (textToPascalName tyName)
                         unConName = fromString ("un" <> textToPascalName tyName)
                         con       = recordCon occName [ ( unConName, strict $ field $ listTy $ var "TaxRateId") ]
-                    in [ newtype' occName [] con derivingCommon ]
+                    in ([], [ newtype' occName [] con derivingCommon ])
 
                 _ -> error "could not default_tax_rates: was expecting an array of strings but something does not match."
         _  -> error "default_tax_rates specification does not match expectations. The spec must have been updated."
@@ -493,7 +496,7 @@ schemaToTypeDecls objName tyName s
         True -> mkNewtypeParam tyName (var "Emptyable" @@ var "AccountId")
 
   | _schemaType s == Just OpenApiString =
-      [] -- (snd $ schemaToEnumDecl objName tyName s)
+      ([], []) -- (snd $ schemaToEnumDecl objName tyName s)
 
   | isJust (_schemaAnyOf s) =
       case _schemaAnyOf s of
@@ -513,7 +516,7 @@ schemaToTypeDecls objName tyName s
                    conName   = fromString (textToPascalName tyName)
                    unConName = fromString ("un" <> textToPascalName tyName)
                    con       = recordCon occName [ ( unConName, strict $ field $ var "NowOrLater") ]
-               in [ newtype' occName [] con derivingCommon ]
+               in ([], [ newtype' occName [] con derivingCommon ])
         _ ->
           case InsOrd.lookup "expansionResources" (_unDefs $ _schemaExtensions s) of
             Nothing ->
@@ -529,7 +532,7 @@ schemaToTypeDecls objName tyName s
                       unConName = fromString ("un" <> textToPascalName tyName)
                       cons = [ recordCon conName [ (unConName, strict $ field $ (var "OneOf" @@ listPromotedTy types)) ]
                              ]
-                  in (data' occName [] cons derivingCommon : mkFromJSON objName s : [] {- :  concat decls -} )
+                  in (concat imports, (data' occName [] cons derivingCommon : mkFromJSON objName s : [] {- :  concat decls -} ))
 
 {-
             Nothing ->
@@ -551,19 +554,19 @@ schemaToTypeDecls objName tyName s
 --          (fields, decls) =  unzip $ map (schemaToField (fromMaybe "FixMe2b" (_schemaTitle s))) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
 --          (imports, fields, decls) =  unzip3 $ map (schemaToField tyName) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
           con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Integer" ) ]
-      in [ newtype' occName [] con derivingCommon ]
+      in ([], [ newtype' occName [] con derivingCommon ])
   -- FIXME: should we use a Decimal type instead of Double?
   | _schemaType s == Just OpenApiNumber =
       let occName = fromString (textToPascalName $ tyName)
           con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Double" ) ]
-      in [ newtype' occName [] con derivingCommon ]
+      in ([], [ newtype' occName [] con derivingCommon ])
 
   | _schemaType s == Just OpenApiBoolean =
       let occName = fromString (textToPascalName $ tyName)
 --          (fields, decls) =  unzip $ map (schemaToField (fromMaybe "FixMe2b" (_schemaTitle s))) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
 --          (imports, fields, decls) =  unzip3 $ map (schemaToField tyName) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
           con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Bool" ) ]
-      in [ newtype' occName [] con derivingCommon ]
+      in ([], [ newtype' occName [] con derivingCommon ])
 
   | _schemaType s == Just OpenApiArray =
       case _schemaItems s of
@@ -575,7 +578,7 @@ schemaToTypeDecls objName tyName s
           | _schemaType s == Just OpenApiString ->
               let occName = fromString (textToPascalName $ tyName)
                   con = recordCon occName [(fromString $ "un" <> textToPascalName tyName, field $ listTy $ var "Text")]
-          in (data' occName [] [con] derivingCommon) : [] -- : concat decls
+          in ([], (data' occName [] [con] derivingCommon) : []) -- : concat decls
 
         Just (OpenApiItemsObject (Inline s)) ->
           let -- decls' = schemaToTypeDecls "FixMe4a" "FixMe4b" s
@@ -594,7 +597,7 @@ schemaToTypeDecls objName tyName s
 --              (imports, fields, decls) =  unzip3 $ map (schemaToField tyName) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
 --              con = recordCon occName fields
               con = recordCon occName [(fromString $ "un" <> textToPascalName tyName, field $ listTy $ var "a")]
-          in entryDecl : (data' occName [] [con] derivingCommon) : [] -- : concat decls
+          in (concat entryImports , entryDecl : (data' occName [] [con] derivingCommon) : []) -- : concat decls
 
 --          in (listTy $ var (textToPascalName tyName) decls'
 {-
@@ -608,7 +611,7 @@ schemaToTypeDecls objName tyName s
 --          (fields, decls) =  unzip $ map (schemaToField (fromMaybe "FixMe2b" (_schemaTitle s))) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
           (imports, fields, decls) =  unzip3 $ map (schemaToField (_schemaRequired s) name) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
           con = recordCon occName fields
-      in (data' occName [] [con] derivingCommon)  : concat decls
+      in (concat imports, (data' occName [] [con] derivingCommon)  : concat decls)
 {-
   | otherwise = error $ "schemaToTypeDecls: " ++ show (tyName, ppSchema s)
 -}
@@ -688,15 +691,16 @@ mkStripeHasParam opName mIdName (Inline param) =
             (Just idName) -> (textToPascalName idName, instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var paramNm @@ (var $ textToPascalName idName))) [])
      else (paramNm, instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var $ paramNm)) [])
 
-mkStripeHasParamFromProperty :: OccNameStr -> (Text, (Referenced Schema)) -> [(HsDecl', InsOrdHashMap Text [HsDecl'])]
+mkStripeHasParamFromProperty :: OccNameStr -> (Text, (Referenced Schema)) -> [([RdrNameStr], HsDecl', InsOrdHashMap Text [HsDecl'])]
 mkStripeHasParamFromProperty opName (pName, (Inline schema)) =
   let pn = mkParamName pName
       inst = instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var pn)) []
-      tys = InsOrd.fromList [(pName, schemaToTypeDecls "FixMeHasParamFromProperty1" pName schema)]
-  in [(inst, tys)]
+      (imports, decls) = schemaToTypeDecls "FixMeHasParamFromProperty1" pName schema
+      tys = InsOrd.fromList [(pName, decls)]
+  in [(imports, inst, tys)]
 
 
-mkStripeRequestBodyStripeHasParam :: OccNameStr -> Maybe (Referenced RequestBody) -> ([ParamName], [(HsDecl', InsOrdHashMap Text [HsDecl'])])
+mkStripeRequestBodyStripeHasParam :: OccNameStr -> Maybe (Referenced RequestBody) -> ([ParamName], [([RdrNameStr], HsDecl', InsOrdHashMap Text [HsDecl'])])
 mkStripeRequestBodyStripeHasParam opName Nothing = ([], [])
 mkStripeRequestBodyStripeHasParam opName (Just (Inline rb)) =
   case InsOrd.lookup "application/x-www-form-urlencoded" (_requestBodyContent rb) of
@@ -817,7 +821,7 @@ mkOperation :: FilePath   -- ^ path
             -> Method     -- ^ method
             -> Maybe Text -- ^ what type is {id}
             -> Operation
-            -> ([HsDecl'], [RdrNameStr], [RdrNameStr]) -- ^ (decls, re-exports, new things to export)
+            -> ([RdrNameStr], [HsDecl'], [RdrNameStr], [RdrNameStr]) -- ^ (imports, decls, re-exports, new things to export)
 mkOperation path method mIdName op =
   let opName :: OccNameStr
       opName   = textToPascalName $ fromJust $ _operationOperationId op
@@ -826,7 +830,7 @@ mkOperation path method mIdName op =
       opIdDecl = data' opName [] [] []
 
       (requiredParams, decls) = mkStripeRequestBodyStripeHasParam opName (_operationRequestBody op)
-      (instanceDecls, typeDecls) = unzip decls
+      (paramImports, instanceDecls, typeDecls) = unzip3 decls
       typeDecls' :: [HsDecl']
       typeDecls' = concatMap snd $ concatMap InsOrd.toList typeDecls
 
@@ -852,7 +856,7 @@ mkOperation path method mIdName op =
         case mIdName of
           Nothing -> id
           (Just idName) -> (textToPascalName idName :)
-  in ((requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls)),  addIdName (returnImports ++ params ++ reexports), [] {- requestTypes FIMXE -})
+  in (concat paramImports, (requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls)),  addIdName (returnImports ++ params ++ reexports), [] {- requestTypes FIMXE -})
 
 
 {-
@@ -894,6 +898,19 @@ unzip3Concat l =
   in (concat as, concat bs, concat cs)
 
 
+unzip4   :: [(a,b,c,d)] -> ([a],[b],[c],[d])
+{-# INLINE unzip4 #-}
+-- Inline so that fusion `foldr` has an opportunity to fire.
+-- See Note [Inline @unzipN@ functions] in GHC/OldList.hs.
+unzip4   =  foldr (\(a,b,c,d) ~(as,bs,cs,ds) -> (a:as,b:bs,c:cs,d:ds))
+                  ([],[],[],[])
+
+unzip4Concat :: [([a],[b],[c],[d])] -> ([a],[b],[c],[d])
+unzip4Concat l =
+  let (as, bs, cs, ds) = unzip4 l
+  in (concat as, concat bs, concat cs, concat ds)
+
+
 lookupPaths :: InsOrdHashMap FilePath PathItem -> [(FilePath, Maybe Text)] -> [PathItem]
 lookupPaths hash [] = []
 lookupPaths hash ((p,_) : ps) =
@@ -901,15 +918,19 @@ lookupPaths hash ((p,_) : ps) =
     (Just pi) -> pi : lookupPaths hash ps
     Nothing -> error $ "lookupPaths: could not find path " ++ p
 
+-- mkImport :: RdrNameStr -> IE'
+mkImport n =  import' (fromString $ "Web.Stripe.Component."  <> (rdrNameStrToString n))
+
 mkPaths :: OpenApi -- ^ openapi spec
         -> [(FilePath, Maybe Text)]    -- ^ path (e.g. \/v1\/account), what type is '{id}' in the path
         -> NonEmpty String    -- ^ module name -- just the last bit like 'Account'
         -> IO ()
 mkPaths oa paths modBaseName =
-  do let (opDecls, reexportTypes, additionalExports) = unzip3Concat $ map (mkPath oa) paths
+  do let (pathImports, opDecls, reexportTypes, additionalExports) = unzip4Concat $ map (mkPath oa) paths
          requestBodyProperties =
            concatMap findPropertiesInPathItems (lookupPaths (_openApiPaths oa) paths)
-         propDecls = concatMap (uncurry (schemaToTypeDecls "FixMeMkPaths")) ([ (t, s) | (t, Inline s) <- requestBodyProperties ])
+         (propImports', propDecls') = unzip $ map (uncurry (schemaToTypeDecls "FixMeMkPaths")) ([ (t, s) | (t, Inline s) <- requestBodyProperties ])
+         (propImports, propDecls) = (nub $ concat propImports', concat propDecls')
          exports = Just (nub $ {- reexportTypes ++ -} (map var (additionalExports)))
          imports = [ import' "Data.Data" `exposing` [ var "Data" ]
                    , import' "Data.Text" `exposing` [ var "Text" ]
@@ -922,7 +943,7 @@ mkPaths oa paths modBaseName =
                      ]
                    , import' "Web.Stripe.Types" `exposing` (thingAll "Emptyable" : thingAll "ExpandParams" : thingAll "Metadata" : thingAll "StripeList" : thingAll "StartingAfter": thingAll "EndingBefore" : thingAll "Limit" : [] {- (nub reexportTypes) -} )
                    , import' "Web.Stripe.Util" `exposing` [var "(</>)"]
-                   ]
+                   ] ++ (map mkImport (propImports ++ pathImports))
          modul  = module' (Just $ fromString $ "Web.Stripe." <> foldr1 (\a b -> a <> "." <> b) modBaseName) exports imports (opDecls ++ propDecls)
          extensions = [ FlexibleInstances
                       , MultiParamTypeClasses
@@ -930,7 +951,7 @@ mkPaths oa paths modBaseName =
                       , TypeFamilies
                       ]
      formatted <- showModule ("Web/Stripe/" <> foldr1 (\a b -> a <> "/" <> b) modBaseName <> ".hs") extensions modul True
-     T.putStr formatted
+--     T.putStr formatted
      let filepath = "_generated/src/Web/Stripe/" <> foldr1 (\a b -> a <> "/" <> b) modBaseName <> ".hs"
      createDirectoryIfMissing True (takeDirectory filepath)
      T.writeFile filepath formatted
@@ -951,7 +972,7 @@ mkPaths oa paths modBaseName =
          exports = Just (reexportTypes ++ (map var additionalExports))
 -}
 
-mkPath :: OpenApi -> (FilePath, Maybe Text) -> ([HsDecl'], [IE'], [RdrNameStr])
+mkPath :: OpenApi -> (FilePath, Maybe Text) -> ([RdrNameStr], [HsDecl'], [IE'], [RdrNameStr])
 mkPath oa (path, idName) =
   mkPath' oa GET  (path, idName) <>
   mkPath' oa POST (path, idName)
@@ -973,19 +994,19 @@ mkPath oa (path, idName) =
       exports = Just (reexportTypes ++ (map var additionalExports))
   in (opDecls, reexportTypes, additionalExports)
 -}
-mkPath' :: OpenApi -> Method -> (FilePath, Maybe Text) -> ([HsDecl'], [IE'], [RdrNameStr])
+mkPath' :: OpenApi -> Method -> (FilePath, Maybe Text) -> ([RdrNameStr], [HsDecl'], [IE'], [RdrNameStr])
 mkPath' oa method (path, idName) =
   let (Just pi) = InsOrd.lookup path (_openApiPaths oa)
       mop = case method of
                     GET  -> _pathItemGet pi
                     POST -> _pathItemPost pi
   in case mop of
-        Nothing -> ([],[],[])
+        Nothing -> ([],[],[], [])
         (Just op) ->
-          let (opDecls, reexports, additionalExports) = mkOperation path method idName op
+          let (imports, opDecls, reexports, additionalExports) = mkOperation path method idName op
               reexportTypes = map thingAll (nub reexports)
 --              exports = Just ({- reexportTypes ++ -} (map var additionalExports))
-          in (opDecls, reexportTypes, additionalExports)  -- FIXME: we used to define all the types in Web.Stripe.Types, but now some are defined locally
+          in (imports, opDecls, reexportTypes, additionalExports)  -- FIXME: we used to define all the types in Web.Stripe.Types, but now some are defined locally
 
 
 {-
@@ -1039,7 +1060,7 @@ mkJsonField _ (fieldName, (Ref r)) =
 mkId :: Text -> [HsDecl']
 mkId baseName =
   let n = textToPascalName $ baseName <> "_id"
-  in [ newtype' (fromString $ T.unpack n) []
+  in  [ newtype' (fromString $ T.unpack n) []
        ( recordCon (fromString $ T.unpack n) [ (textToCamelName $ "un_" <> baseName <> "_id",  field $ var "Text") ]
        ) [ deriving' [ var "Read"
                      , var "Show"
@@ -1049,25 +1070,26 @@ mkId baseName =
                      , var "Typeable"
                      ]
          ]
-       -- FIXME: this is definitely not the right way to call typeInstance'
-     , typeInstance' ("ExpandsTo "<> T.unpack (textToPascalName (baseName <> "_id")))  hsOuterImplicit [] Prefix (var $ fromString $ T.unpack $ textToPascalName baseName)
-     , instance' (var "FromJSON" @@ (var $ fromString $ T.unpack n))
-       [ funBinds "parseJSON" [ match [ bvar "(String x)" ] $
-                                op' (var "pure") "$" ((var $ fromString $ T.unpack n) @@ var "x")
-                              , match [ wildP ] (var "mzero")
-                              ]
-       ]
-     ]
+      , instance' (var "FromJSON" @@ (var $ fromString $ T.unpack n))
+        [ funBinds "parseJSON" [ match [ bvar "(String x)" ] $
+                                 op' (var "pure") "$" ((var $ fromString $ T.unpack n) @@ var "x")
+                               , match [ wildP ] (var "mzero")
+                               ]
+        ]
+      , typeInstance' ("ExpandsTo "<> T.unpack (textToPascalName (baseName <> "_id")))  hsOuterImplicit [] Prefix (var $ fromString $ T.unpack $ textToPascalName baseName)
+      ]
+      -- FIXME: this is definitely not the right way to call typeInstance'
+
 
 -- create type declarations from 'Referenced Param'
 mkParam :: Referenced Param -> [HsDecl']
 mkParam (Ref r) = []
 mkParam (Inline p) =
   [ newtype' (textToPascalName $ _paramName p) []
-      (recordCon (textToPascalName $ _paramName p) []) derivingCommon 
+      (recordCon (textToPascalName $ _paramName p) []) derivingCommon
   ]
 
-mkObject :: (Text, Schema) -> [HsDecl']
+mkObject :: (Text, Schema) -> ([RdrNameStr], [HsDecl'])
 mkObject (objName', schema) =
   let objName = case objName' of
         "automatic_tax" ->  "automatic_tax_object"
@@ -1075,6 +1097,64 @@ mkObject (objName', schema) =
   in {- (mkFromJSON objName schema) : -}
       (schemaToTypeDecls objName objName schema)
 
+mkComponents :: OpenApi -> IO ()
+mkComponents oa =
+  mapM_ mkComponent (InsOrd.toList (_componentsSchemas (_openApiComponents oa)))
+
+-- turn each component into a separate Haskell module
+mkComponent :: (Text, Schema) -> IO ()
+mkComponent component@(name, schema) =
+  do let extensions = [ DataKinds
+                      , DeriveDataTypeable
+                      , FlexibleContexts
+                      , OverlappingInstances
+                      , OverloadedStrings
+                      , RecordWildCards
+                      , StandaloneDeriving
+                      , TypeFamilies
+                      , UndecidableInstances
+                      ]
+         staticImports =
+           [ import' "Control.Applicative" `exposing` [ var "pure", var "(<$>)", var "(<*>)", var "(<|>)" ]
+           , import' "Control.Monad" `exposing` [ var "mzero" ]
+           , import' "Data.Aeson" `exposing` [ thingWith "FromJSON" [ "parseJSON" ]
+                                             , thingAll "ToJSON"
+                                             , thingWith "Value" [ "String", "Object", "Bool" ]
+                                             , var "(.:)"
+                                             , var "(.:?)"
+                                             ]
+           , import' "Data.Aeson.Types" `exposing` [ var "typeMismatch" ]
+           , import' "Data.Data"  `exposing` [ var "Data", var "Typeable" ]
+           , qualified' $ import' "Data.HashMap.Strict" `as'` "H"
+           , import' "Data.Map"   `exposing` [ var "Map" ]
+           , import' "Data.Ratio" `exposing` [ var "(%)" ]
+           , import' "Data.Text"  `exposing` [ var "Text" ]
+           , import' "Data.Time"  `exposing` [ var "UTCTime" ]
+--           , import' "Numeric"  `exposing` [ var "fromRat" , var "showFFLoat" ]
+           , import' "Text.Read"  `exposing` [ var "lexP", var "pfail" ]
+           , qualified' $ import' "Text.Read" `as'` "R"
+           , import' "Web.Stripe.OneOf" `exposing` [ thingAll "OneOf" ]
+           , import' "Web.Stripe.Types"
+           , import' "Web.Stripe.Util"  `exposing` [ var "fromSeconds" ]
+           ]
+         exports = Nothing
+         (objectImports', objectDecls) = mkObject component
+         objectImports = map (\n -> import' (fromString $ "Web.Stripe.Component."  <> (rdrNameStrToString n))) objectImports'
+         decls = [ -- ExpandsTo
+                 ] ++
+                 objectDecls ++
+                 concatMap mkId (findIds' component) ++
+--                 mkEnums (findEnums' component Map.empty) ++
+
+                 []
+         pname :: String
+         pname = T.unpack $ textToPascalName name
+         modul = module' (Just $ fromString ("Web.Stripe.Component." <> pname)) exports (staticImports ++ objectImports) decls
+
+     formatted <- showModule ("Web/Stripe/Component/" <> pname) extensions modul True
+     createDirectoryIfMissing True "_generated/src/Web/Stripe/Component/"
+     T.writeFile ("_generated/src/Web/Stripe/Component/" <> pname <> ".hs") formatted
+     pure ()
 
 -- create Web.Stripe.Types
 mkTypes :: OpenApi -> IO ()
@@ -1119,12 +1199,12 @@ mkTypes oa =
 --                 , tyFamInst "ExpandsTo" [var "AccountId"] (var "Account")
                  -- fixme -- fake types
                  , data' "LineItems" []  [ prefixCon "LineItems" [] ] derivingCommon
-                 , data' "FixMe4b" []  [ prefixCon "FixMe4b" [] ] derivingCommon
-                 , data' "FixMe4bId" []  [ prefixCon "FixMe4bId" [] ] derivingCommon
-                 , typeInstance' "ExpandsTo FixMe4bId"  hsOuterImplicit [] Prefix (var "FixMe4bId")
+--                 , data' "FixMe4b" []  [ prefixCon "FixMe4b" [] ] derivingCommon
+--                 , data' "FixMe4bId" []  [ prefixCon "FixMe4bId" [] ] derivingCommon
+--                 , typeInstance' "ExpandsTo FixMe4bId"  hsOuterImplicit [] Prefix (var "FixMe4bId")
                  , data' "UseStripeSdk" []  [ prefixCon "UseStripeSdk" [] ] derivingCommon
                  , instance' (var "FromJSON" @@ var "UseStripeSdk") [ funBinds "parseJSON" [ match []  (var "undefined")] ]
-                 , instance' (var "FromJSON" @@ var "StripeType") [ funBinds "parseJSON" [ match []  (var "undefined")] ]
+--                 , instance' (var "FromJSON" @@ var "StripeType") [ funBinds "parseJSON" [ match []  (var "undefined")] ]
                  , data' "Refunds" []  [ prefixCon "Refunds" [] ] derivingCommon
                  , data' "Expandable" [ bvar "id" ] [ prefixCon "Id" [ field $ var "id" ]
                                                     , prefixCon "Expanded"  [field $ var "ExpandsTo" @@ var "id"]
@@ -1210,11 +1290,13 @@ mkTypes oa =
                     [ prefixCon "Full"  [ strict $ field $ var "a" ]
                     , prefixCon "Empty" []
                     ] derivingCommon
+{-
                  , type' "PaymentSourceId" [] (var "OneOf" @@ listPromotedTy [ var "AccountId"
                                                                              ] )
                  , type' "BalanceTransactionSourceId" [] (var "OneOf" @@ listPromotedTy
                                                                              [ var "ApplicationFeeId"
                                                                              ] )
+-}
                  ] ++  map mkTimeNewtype timeNewtypes ++
                  [ {- data' "Currency" []
                     [ prefixCon "USD" [] -- FIXME, calculate entire list
@@ -1233,9 +1315,9 @@ mkTypes oa =
                  , typeSig "emptyTimeRange" $ var "TimeRange" @@ var "a"
                  , funBind "emptyTimeRange" $ match [] (var "TimeRange" @@ var "Nothing" @@ var "Nothing" @@ var "Nothing" @@ var "Nothing" )
                  ] ++
-                 mkEnums (findEnums oa) ++
-                 concatMap mkId (findIds oa) ++
-                 concatMap mkObject (InsOrd.toList cs) ++
+--                 mkEnums (findEnums oa) ++
+--                 concatMap mkId (findIds oa) ++
+--                 concatMap mkObject (InsOrd.toList cs) ++
 --                 concatMap mkParam (findParams oa) ++
                  []
 --                 concatMap (uncurry (schemaToTypeDecls "foo")) ([ (t, s) | (t, Inline s) <- findRequestBodyProperties oa ])
@@ -1386,9 +1468,11 @@ mkEnums (Map.toList -> enums) = concatMap mkEnum $ {- filter (\(t,c) -> not $ "_
     mkEnum ("balance", conNms) =
       [ data' (textToPascalName "treasury_balance") [] [ prefixCon (textToPascalName ("type_" <> c)) [] | c <- Set.toList conNms ] derivingCommon
       ]
+{-
     mkEnum ("type", conNms) =
       [ data' (textToPascalName "stripe_type") [] [ prefixCon (textToPascalName ("type_" <> c)) [] | c <- Set.toList conNms ] derivingCommon
       ]
+-}
     mkEnum ("object", conNms) =
       [ data' (textToPascalName "stripe_object") [] [ prefixCon (textToPascalName ("object_" <> c)) [] | c <- Set.toList conNms ] derivingCommon
       ]
@@ -1426,6 +1510,7 @@ main =
      copyFile "static/Web/Stripe/Util.hs" "_generated/src/Web/Stripe/Util.hs"
 
      mkTypes oa
+     mkComponents oa
 #if 0
      -- Web.Stripe.Account
      mkPaths oa [("/v1/account", Just "AccountId")] (NonEmpty.singleton "Account")
@@ -1631,6 +1716,3 @@ data SimpleDecl =
   SimpleData Text [SimpleCon]
   deriving (Eq, Ord, Show)
 -}
-
-
-
