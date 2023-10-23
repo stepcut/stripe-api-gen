@@ -1142,6 +1142,27 @@ breakCycle "Customer" "InvoiceSettingCustomerSetting" = True
 breakCycle "Customer" "Subscription" = True
 breakCycle "Charge" "PaymentSource" = True
 breakCycle _        "ApiErrors" = True
+breakCycle _        "PaymentSource" = True
+breakCycle _        "FileLink" = True
+breakCycle _        "ExternalAccount" = True
+breakCycle _        "PaymentMethod" = True
+breakCycle _        "TaxId" = True
+breakCycle _        "Discount" = True
+breakCycle _        "PaymentSource" = True
+breakCycle _        "InvoiceSettingCustomerSetting" = True
+breakCycle _        "Subscription" = True
+breakCycle _        "Charge" = True
+breakCycle _        "Transfer" = True
+breakCycle _        "TransferReversal" = True
+breakCycle _        "SetupAttempt" = True
+breakCycle _        "PaymentIntent" = True
+breakCycle _        "Account" = True
+breakCycle _        "ApplicationFee" = True
+breakCycle _        "Quote" = True
+breakCycle _        "BalanceTransaction" = True
+breakCycle _        "Invoice" = True
+breakCycle _        "IssuingTransaction" = True
+
 
 {-
 breakCycle "BankAccount" "Account" = True
@@ -1215,7 +1236,7 @@ mkComponent component@(name, schema) =
 
 mkHsBoot :: (Text, Schema) -> IO ()
 mkHsBoot component@(name, schema)
-  | name `elem` ["file_link", "external_account", "payment_method", "tax_id", "discount", "payment_source", "invoice_setting_customer_setting", "subscription", "api_errors"] =
+  | name `elem` ["charge", "file_link", "external_account", "payment_method", "tax_id", "discount", "payment_source", "invoice_setting_customer_setting", "subscription", "transfer", "api_errors", "setup_attempt", "payment_intent", "transfer_reversal", "account", "application_fee", "quote", "balance_transaction", "invoice", "issuing_transaction"] =
   do let extensions = [ DataKinds
                       , DeriveDataTypeable
                       , FlexibleContexts
