@@ -113,19 +113,19 @@ class ToStripeParam param where
 instance ToStripeParam ExpandParams where
   toStripeParam (ExpandParams params) =
     (toExpandable params ++)
-
+{-
 instance ToStripeParam ChargeId where
   toStripeParam (ChargeId cid) =
     (("charge", Text.encodeUtf8 cid) :)
-
+-}
 instance ToStripeParam Created where
   toStripeParam (Created time) =
     (("created", toBytestring $ toSeconds time) :)
-
+{-
 instance ToStripeParam ApplicationFeeId where
   toStripeParam (ApplicationFeeId aid) =
     (("application_fee", Text.encodeUtf8 aid) :)
-
+-}
 instance (ToStripeParam param) => ToStripeParam (StartingAfter param) where
   toStripeParam (StartingAfter param) =
     case toStripeParam param [] of

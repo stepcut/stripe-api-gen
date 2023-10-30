@@ -199,6 +199,9 @@ referencedSchemaToType gs objName n (Ref (Reference r)) =
         | otherwise = [(textToPascalName r, [textToPascalName r]) ]
   in (imports, (var $ textToPascalName r), [])
 
+-- the `[HsDecl']`in the return value should probably be removed. This
+-- should probably return the name of something that should already
+-- exist, but it should not declare new things
 schemaToType :: GenStyle
              -> Text
              -> Text
@@ -215,7 +218,7 @@ schemaToEnumDecl :: Text    -- ^ objName -- used for disambiguation
                  -> Schema  -- ^ enum schema
                  -> (HsType', [HsDecl'])
 schemaToEnumDecl objNm nm s
-  | nm == "version" =
+  | nm == "version" && isJust (_schemaEnum s) =
       let (Just vs) =  _schemaEnum s
           cons = [ prefixCon (textToPascalName $ "V" <> c) [] | (Aeson.String c) <- vs ]
           occName  = (textToPascalName (objNm <> "_"<> nm))
@@ -433,8 +436,9 @@ schemaToField gs required objectName (n, Inline s)
 --  | n == "discounts" = error $ show (n, s)
 
 schemaToField gs required objectName (n, Inline s) =
-   let (imports, ty, decls) = schemaToType gs objectName n s
-   in (imports, (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ ty) , decls)
+   let (imports, ty, _decls) = schemaToType gs objectName n s
+       (imports', decls) = schemaToTypeDecls gs objectName n s
+   in (imports ++ imports', (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ ty) , decls)
 
 {- check for stuff like this,
 
@@ -512,6 +516,7 @@ schemaToTypeDecls gs objName tyName s
   -- types which are manually defined in Types
   | tyName `elem` [ "expand", "metadata" ] = ([], [])
   | tyName `elem` ["lines", "line_items", "use_stripe_sdk", "refunds", "customer_id", {- "automatic_tax", -} "currency"] = ([], [])
+  {-
   | tyName == "default_tax_rates" =
       -- FIXME: The docs says  'Pass an empty string to remove previously-defined tax rates'. Does passing an empty list do that?
       case _schemaAnyOf s of
@@ -531,16 +536,16 @@ schemaToTypeDecls gs objName tyName s
         _  -> error "default_tax_rates specification does not match expectations. The spec must have been updated."
   | tyName == "on_behalf_of" =
       case isEmptyableString s of
-        False -> error "expected on_behalf_of to be a Maybe String. Perhaps the specification has changed?"
+        False -> error $ "expected on_behalf_of to be a Maybe String. Perhaps the specification has changed?\n" ++ show (ppSchema s)
         True -> mkNewtypeParam tyName (var "Emptyable" @@ var "AccountId")
-
   | tyName == "default_tax_rate" =
       case isEmptyableString s of
         False -> error "expected default_tax_rate to be a Maybe String. Perhaps the specification has changed?"
         True -> mkNewtypeParam tyName (var "Emptyable" @@ var "AccountId")
-
+-}
   | _schemaType s == Just OpenApiString =
-      ([], []) -- (snd $ schemaToEnumDecl objName tyName s)
+      ([], snd $ schemaToEnumDecl objName tyName s)
+      -- ([], []) -- 
 
   | isJust (_schemaAnyOf s) =
       case _schemaAnyOf s of
@@ -601,7 +606,8 @@ schemaToTypeDecls gs objName tyName s
               in (data' occName [] cons derivingCommon : mkFromJSON objName s : [] {- :  concat decls -} )
 -}
             (Just er) ->
-              error $ show er
+              ([], [])
+            --  error $ show er
 
   | _schemaType s == Just OpenApiInteger =
       let occName = fromString (textToPascalName $ tyName)
@@ -638,7 +644,11 @@ schemaToTypeDecls gs objName tyName s
           let -- decls' = schemaToTypeDecls "FixMe4a" "FixMe4b" s
               entryTy = case _schemaTitle s of
                           (Just t) -> t
-                          Nothing  -> error $ "schemaToTypeDecls - could not find schemaTitle for " ++ show (ppSchema s)
+                          Nothing  -> "FixMeEntryTy"
+{-
+                            let (_,ty,_) = schemaToType gs objName tyName s -- error $ "schemaToTypeDecls - could not find schemaTitle for " ++ show (ppSchema s)
+                            in ty
+-}
               entryTyName = textToPascalName entryTy
 --              (imports, fields, decls) =  unzip $ map (schemaToField (fromMaybe "FixMe2b" (_schemaTitle s))) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
               (entryImports, entryFields, entryDecls) =  unzip3 $ map (schemaToField gs (_schemaRequired s) tyName) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
@@ -650,15 +660,16 @@ schemaToTypeDecls gs objName tyName s
 
 --              (imports, fields, decls) =  unzip3 $ map (schemaToField tyName) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
 --              con = recordCon occName fields
-              con = recordCon occName [(fromString $ "un" <> textToPascalName tyName, field $ listTy $ var "a")]
-          in (concat entryImports , entryDecl : (data' occName [] [con] (derivingCommon' gs)) : []) -- : concat decls
+              con = recordCon occName [(fromString $ "un" <> textToPascalName tyName, field $ listTy $ var $ textToPascalName entryTy)]
+          in (concat entryImports , entryDecl : (data' occName [] [con] (derivingCommon' gs)) : concat entryDecls) -- : concat decls
 
 --          in (listTy $ var (textToPascalName tyName) decls'
 {-
           let (imports, ty, decls) = schemaToType' "FixMe4a" "FixMe4b" s
           in (imports, var "StripeList" @@ ty, decls)
-        Nothing -> ([], var "schemaToTypeDecls - FixMeOpenApiItemsObject", [])
 -}
+        _ -> trace "We should probably actually do something here. 1." ([], [])
+
   | otherwise =
       let name = tyName
           occName = fromString (textToPascalName name)
@@ -909,6 +920,8 @@ mkOperation path method mIdName op =
 
       stripeReturnDecl = tyFamInst "StripeReturn" [var $ UnqualStr opName] returnTy
 
+--      mkEnums AllDeclarations name (findEnums' component Map.empty)
+
 --      map referencedParamToDecl (_operationParameters $ fromJust $ _pathItemPost pi)
       addIdName =
         case mIdName of
@@ -1008,7 +1021,7 @@ mkPaths oa paths modBaseName =
                       , OverloadedStrings
                       , TypeFamilies
                       ]
-     formatted <- showModule ("Web/Stripe/" <> foldr1 (\a b -> a <> "/" <> b) modBaseName <> ".hs") extensions modul True
+     formatted <- showModule ("Web/Stripe/" <> foldr1 (\a b -> a <> "/" <> b) modBaseName <> ".hs") extensions modul False
 --     T.putStr formatted
      let filepath = "_generated/src/Web/Stripe/" <> foldr1 (\a b -> a <> "/" <> b) modBaseName <> ".hs"
      createDirectoryIfMissing True (takeDirectory filepath)
@@ -1032,7 +1045,7 @@ mkPaths oa paths modBaseName =
 
 mkPath :: OpenApi -> (FilePath, Maybe Text) -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [IE'], [RdrNameStr])
 mkPath oa (path, idName) =
-  mkPath' oa GET  (path, idName) <>
+--  mkPath' oa GET  (path, idName) <>
   mkPath' oa POST (path, idName)
 {-
 mkPath oa (path, idName) =
@@ -1691,8 +1704,8 @@ main =
 --     print $ Map.keys e
      createDirectoryIfMissing True "_generated/src/Web/Stripe"
      copyFile "static/Web/Stripe/StripeRequest.hs" "_generated/src/Web/Stripe/StripeRequest.hs"
-     copyFile "static/Web/Stripe/OneOf.hs" "_generated/src/Web/Stripe/OneOf.hs"
-     copyFile "static/Web/Stripe/Util.hs" "_generated/src/Web/Stripe/Util.hs"
+     copyFile "static/Web/Stripe/OneOf.hs"         "_generated/src/Web/Stripe/OneOf.hs"
+     copyFile "static/Web/Stripe/Util.hs"          "_generated/src/Web/Stripe/Util.hs"
 
      mkTypes oa
      mkComponents oa
