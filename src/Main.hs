@@ -1,4 +1,4 @@
-{-# language CPP  #-}
+{-# language CPP #-}
 {-# language NoMonomorphismRestriction #-}
 {-# language FlexibleContexts #-}
 {-# language OverloadedStrings #-}
@@ -222,6 +222,7 @@ schemaToEnumDecl :: Text    -- ^ objName -- used for disambiguation
 schemaToEnumDecl objNm nm s
   | nm == "object" = (var "FixMeSchemaToEnumDecl", [])
 --       (textToPascalName "stripe_object", [ data' (textToPascalName "stripe_object") [] [ prefixCon (textToPascalName ("object_" <> c)) [] | c <- Set.toList conNms ] (derivingCommon' AllDeclarations) ])
+
   | nm == "version" && isJust (_schemaEnum s) =
       let (Just vs) =  _schemaEnum s
           cons = [ prefixCon (textToPascalName $ "V" <> c) [] | (Aeson.String c) <- vs ]
@@ -772,7 +773,7 @@ mkStripeHasParamFromProperty modBaseName opName (pName, r@(Inline schema)) =
       (imports, decls) = schemaToTypeDecls AllDeclarations "FixMeHasParamFromProperty1" pName schema
       tys = InsOrd.fromList [(pName, decls)]
       ownMod
-        | needsOwnModule schema = Just $ modBaseName <> (NonEmpty.singleton $ T.unpack pName)
+        | needsOwnModule schema = Just $ modBaseName <> (NonEmpty.singleton $ textToPascalName pName)
         | otherwise = Nothing
   in (ownMod , imports, insts, tys)
 
@@ -899,13 +900,26 @@ mkRequestDecl path method idName oper requiredParams =
        ]
       , [ opName', textToCamelName $ fromJust $ _operationOperationId oper ]
       )
+{-
+mkOperationTypes :: ((NonEmpty String), [(RdrNameStr, [RdrNameStr])], [HsDecl'], InsOrdHashMap Text [HsDecl'])
+                 -> ((NonEmpty String), [(RdrNameStr, [RdrNameStr])], [HsDecl'], [RdrNameStr]) -- ^ (imports, decls, re-exports, new things to export)
+mkOperationTypes (modBaseName, decls) =
+  let (_, paramImports, instanceDecls, typeDecls) = unzip4 decls
 
+      -- extract the various types
+      typeDecls' :: [HsDecl']
+      typeDecls' = concatMap snd $ concatMap InsOrd.toList typeDecls
+
+      -- used as part of creating an explicit export list?
+--      reexports =  map (mkParamName Pascal . fst) $ concatMap InsOrd.toList typeDecls
+  in (modBaseName, paramImports, instanceDecls, typeDecls')
+-}
 mkOperation :: NonEmpty String -- ^ module name -- just the last bit like 'Account'
             -> FilePath        -- ^ path
             -> Method          -- ^ method
             -> Maybe Text      -- ^ what type is {id}
             -> Operation
-            -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [RdrNameStr], [RdrNameStr]) -- ^ (imports, decls, re-exports, new things to export)
+            -> [(Maybe (NonEmpty String), ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [RdrNameStr]))] -- ^ (imports, decls, re-exports, new things to export)
 mkOperation modBaseName path method mIdName op =
   let opName :: OccNameStr
       opName   = textToPascalName $ fromJust $ _operationOperationId op
@@ -944,7 +958,11 @@ mkOperation modBaseName path method mIdName op =
         case mIdName of
           Nothing -> id
           (Just idName) -> (textToPascalName idName :)
-  in (concat paramImports, (requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls)),  addIdName ((map fst returnImports) ++ params ++ reexports), [] {- requestTypes FIMXE -})
+  in (Nothing, (concat paramImports, (requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls)), [] )) :
+     (map (\(mModBase, pathImports, instanceDecls, typeDecls) -> (mModBase, (pathImports, (concatMap snd $ InsOrd.toList typeDecls) ++ instanceDecls, []))) ownModDecls)
+                                                                            -- (fromJust mModBase, pathImports, instanceDecls, concatMap snd $ concatMap InsOrd.toList typeDecls))) ownModDecls)
+
+--  in [(modBaseName, (concat paramImports, (requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls)),  {- addIdName ((map fst returnImports) ++ params ++ reexports), -} [] {- requestTypes FIMXE -}))]
 
 
 {-
@@ -980,11 +998,6 @@ mkAccount s =
      pure ()
 -}
 
-unzip3Concat :: [([a],[b],[c])] -> ([a],[b],[c])
-unzip3Concat l =
-  let (as, bs, cs) = unzip3 l
-  in (concat as, concat bs, concat cs)
-
 
 unzip4   :: [(a,b,c,d)] -> ([a],[b],[c],[d])
 {-# INLINE unzip4 #-}
@@ -992,6 +1005,11 @@ unzip4   :: [(a,b,c,d)] -> ([a],[b],[c],[d])
 -- See Note [Inline @unzipN@ functions] in GHC/OldList.hs.
 unzip4   =  foldr (\(a,b,c,d) ~(as,bs,cs,ds) -> (a:as,b:bs,c:cs,d:ds))
                   ([],[],[],[])
+
+unzip3Concat :: [([a],[b],[c])] -> ([a],[b],[c])
+unzip3Concat l =
+  let (as, bs, cs) = unzip3 l
+  in (concat as, concat bs, concat cs)
 
 unzip4Concat :: [([a],[b],[c],[d])] -> ([a],[b],[c],[d])
 unzip4Concat l =
@@ -1009,12 +1027,57 @@ lookupPaths hash ((p,_) : ps) =
 -- mkImport :: RdrNameStr -> IE'
 mkImport (n, things) =  import' (fromString $ "Web.Stripe.Component."  <> (rdrNameStrToString n)) `exposing` [ thingWith thing [] | thing <- things ]
 
+mkOwnMods :: (Maybe (NonEmpty String), ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [RdrNameStr]) ) -> IO ()
+mkOwnMods (Just modBaseName, decls) =
+  let (pathImports, opDecls, additionalExports) = decls
+  in  mkPathModule modBaseName pathImports opDecls additionalExports
+
+mkPathModule modBaseName pathImports decls exports =
+  do let imports = [ import' "Data.Data" `exposing` [ var "Data" ]
+                   , import' "Data.Text" `exposing` [ var "Text" ]
+                   , import' "Web.Stripe.StripeRequest" `exposing`
+                       [ thingAll "Method"
+                       , thingWith "StripeHasParam" []
+                       , thingAll "StripeRequest"
+                       , thingAll "ToStripeParam"
+                       , var "StripeReturn"
+                       , var "mkStripeRequest"
+                       ]
+                   , import' "Web.Stripe.Types" `exposing`
+                        [ thingWith "Currency" []
+                        , thingAll "Emptyable"
+                        , thingAll "ExpandParams"
+                        , thingAll "Metadata"
+                        , thingAll "StripeList"
+                        , thingAll "StartingAfter"
+                        , thingAll "EndingBefore"
+                        , thingAll "Limit"
+                        , thingAll "NowOrLater"
+                        ]
+                   , import' "Web.Stripe.Util" `exposing` [var "(</>)"]
+                   ] ++ (map mkImport ({- propImports ++ -} pathImports))
+         exports = Nothing
+         modul  = module' (Just $ fromString $ "Web.Stripe." <> foldr1 (\a b -> a <> "." <> b) modBaseName) exports imports decls
+         extensions = [ FlexibleInstances
+                      , MultiParamTypeClasses
+                      , OverloadedStrings
+                      , TypeFamilies
+                      ]
+     formatted <- showModule ("Web/Stripe/" <> foldr1 (\a b -> a <> "/" <> b) modBaseName <> ".hs") extensions modul False
+--     T.putStr formatted
+     let filepath = "_generated/src/Web/Stripe/" <> foldr1 (\a b -> a <> "/" <> b) modBaseName <> ".hs"
+     createDirectoryIfMissing True (takeDirectory filepath)
+     T.writeFile filepath formatted
+     pure ()
+
 mkPaths :: OpenApi -- ^ openapi spec
         -> [(FilePath, Maybe Text)]    -- ^ path (e.g. \/v1\/account), what type is '{id}' in the path
         -> NonEmpty String    -- ^ module name -- just the last bit like 'Account'
         -> IO ()
 mkPaths oa paths modBaseName =
-  do let (pathImports, opDecls, reexportTypes, additionalExports) = unzip4Concat $ map (mkPath oa modBaseName) paths
+  do let (thisMod, ownMods') = partition (isNothing . fst) $ concatMap (mkPath oa modBaseName) paths
+         ownsMods' = Map.toList $ Map.fromListWith (<>) ownMods'
+         (pathImports, opDecls, {- reexportTypes, -} additionalExports) = unzip3Concat $ map snd thisMod
          requestBodyProperties =
            concatMap findPropertiesInPathItems (lookupPaths (_openApiPaths oa) paths)
 --         (propImports', propDecls') = unzip $ map (uncurry (schemaToTypeDecls AllDeclarations "FixMeMkPaths")) ([ (t, s) | (t, Inline s) <- requestBodyProperties ])
@@ -1044,6 +1107,8 @@ mkPaths oa paths modBaseName =
      let filepath = "_generated/src/Web/Stripe/" <> foldr1 (\a b -> a <> "/" <> b) modBaseName <> ".hs"
      createDirectoryIfMissing True (takeDirectory filepath)
      T.writeFile filepath formatted
+
+     mapM_ mkOwnMods ownMods'
      pure ()
   {-
   do let (Just pi) = InsOrd.lookup path (_openApiPaths oa)
@@ -1064,7 +1129,7 @@ mkPaths oa paths modBaseName =
 mkPath :: OpenApi
        -> NonEmpty String    -- ^ module name -- just the last bit like 'Account'
        -> (FilePath, Maybe Text)
-       -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [IE'], [RdrNameStr])
+       -> [(Maybe (NonEmpty String), ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [RdrNameStr]))]
 mkPath oa modBasePath (path, idName) =
 --  mkPath' oa GET  (path, idName) <>
   mkPath' oa modBasePath POST (path, idName)
@@ -1090,20 +1155,23 @@ mkPath' :: OpenApi
         -> NonEmpty String    -- ^ module name -- just the last bit like 'Account'
         -> Method
         -> (FilePath, Maybe Text)
-        -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [IE'], [RdrNameStr])
+        -> [(Maybe (NonEmpty String), ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [RdrNameStr]))]
 mkPath' oa modBasePath method (path, idName) =
   let (Just pi) = InsOrd.lookup path (_openApiPaths oa)
       mop = case method of
                     GET  -> _pathItemGet pi
                     POST -> _pathItemPost pi
   in case mop of
-        Nothing -> ([],[],[], [])
+       Nothing -> []
+       (Just op) -> mkOperation modBasePath path method idName op
+{-
+        Nothing -> ([],[],[])
         (Just op) ->
-          let (imports, opDecls, reexports, additionalExports) = mkOperation modBasePath path method idName op
-              reexportTypes = map thingAll (nub reexports)
+          let (imports, opDecls, additionalExports) = mkOperation modBasePath path method idName op
+--              reexportTypes = map thingAll (nub reexports)
 --              exports = Just ({- reexportTypes ++ -} (map var additionalExports))
-          in (imports, opDecls, reexportTypes, additionalExports)  -- FIXME: we used to define all the types in Web.Stripe.Types, but now some are defined locally
-
+          in (imports, opDecls, additionalExports)  -- FIXME: we used to define all the types in Web.Stripe.Types, but now some are defined locally
+-}
 
 {-
       imports = [ import' "Web.Stripe.StripeRequest" `exposing`
