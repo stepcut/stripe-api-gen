@@ -231,17 +231,26 @@ schemaToEnumDecl objNm nm s
       in ((var occName ), [data' occName' [] cons derivingCommon])
   | _schemaType s == Just OpenApiString =
       case _schemaEnum s of
-        (Just vs) ->
-          let withPrefix t =
+        (Just vs)
+          | nm == "status" && ([ c | (Aeson.String c) <- vs] ==  [ "active", "inactive", "pending" ]) ->
+              (var "Status", [])
+          | otherwise ->
+              let withPrefixType t =
                 -- FIXME: failure_code is usually a subset of this list
                 -- https://stripe.com/docs/error-codes) for a list of codes).
                 -- failure_code varies from location to location
-                case (nm `elem` ["status", "setup_future_usage", "capture_method"]) of
-                  True -> (objNm <> "_" <> t)
-                  False -> t
-              occNam = textToPascalName $ withPrefix nm
-              cons   = [ prefixCon (textToPascalName $ withPrefix c) [] | (Aeson.String c) <- vs ]
-          in (var (fromString occNam), [data' (fromString occNam) [] cons derivingCommon])
+
+                    -- in AccountCapabilities should we just use plain old Status for everything instead of generating unique status types?
+                    case (nm `elem` ["status", {- "setup_future_usage", "capture_method", -} "type"]) of
+                      True -> (objNm <> "_" <> t)
+                      _ -> t
+                  withPrefixCon conName =
+                    case conName `elem` [ "active", "inactive", "pending", "match", "mismatch", "not_provided", "stolen", "lost", "manual", "automatic" ] of
+                      True -> (nm <> "_" <> conName)
+                      _ -> conName
+                  occNam = textToPascalName $ withPrefixType nm
+                  cons   = [ prefixCon (textToPascalName $ withPrefixCon c) [] | (Aeson.String c) <- vs ]
+              in (var (fromString occNam), [data' (fromString occNam) [] cons derivingCommon])
         Nothing ->
           let typName = textToPascalName nm
               cons     = [ recordCon (fromString $ textToPascalName nm) [ ((fromString $ "un" <> textToPascalName nm)
@@ -286,10 +295,12 @@ schemaToType' :: GenStyle
               -> ([(RdrNameStr, [RdrNameStr])], HsType', [HsDecl']) -- ^
 schemaToType' gs p n s
 --  | n == "type" = ([], var "StripeType", [])
-  | ((n == "type") && (_schemaType s == Just OpenApiString)) = ([], var "Text", [])
+  | ((n == "type") && (_schemaType s == Just OpenApiString)) && (_schemaEnum s == Nothing)  = ([], var "Text", [])
   | n == "type" =  ([], var $ textToPascalName (p <> "_type"), [])
   | n == "status"  && (_schemaEnum s == Nothing) && (_schemaType s == Just OpenApiString) =  ([], var "Text", [])
+  | n == "status"  && ([ c | (Aeson.String c) <- (fromJust $ _schemaEnum s)] ==  [ "active", "inactive", "pending" ]) =  ([], var $ textToPascalName "status", [])
   | n == "status" =  ([], var $ textToPascalName (p <> "_status"), [])
+  | n == "version" && isJust (_schemaEnum s) = ([],  var $ textToPascalName (p <> "_version"), [])
 
   | (_schemaType s == Just OpenApiInteger) && (_schemaFormat s == Just "unix-time") =
       ([], var "UTCTime", [])
@@ -356,7 +367,7 @@ schemaToType' gs p n s
                 Nothing -> error "Expected 'lines' to have a data property"
 
             _ ->
-              let (imports, decls) = schemaToTypeDecls gs p n s
+              let (imports, decls) = schemaToTypeDecls gs False p n s
               in (imports, var (fromString $ textToPascalName n), decls)
   | isJust (_schemaAnyOf s) =
       case _schemaAnyOf s of
@@ -420,8 +431,8 @@ mkRequired True a = a
 mkRequired False a = var "Maybe" @@ a
 
 -- when do we use _schemaNullable and when do we use _schemaRequired?
-schemaToField :: GenStyle -> [ParamName] -> Text -> (Text, Referenced Schema) -> ([(RdrNameStr, [RdrNameStr])], (OccNameStr, Field), [HsDecl'])
-schemaToField gs required objectName (n, Inline s)
+schemaToField :: GenStyle -> Bool -> [ParamName] -> Text -> (Text, Referenced Schema) -> ([(RdrNameStr, [RdrNameStr])], (OccNameStr, Field), [HsDecl'])
+schemaToField gs wrapPrim required objectName (n, Inline s)
   | n == "id" && _schemaType s == Just OpenApiString =
       -- we don't need to import this id because it is an id that is defined in the local module. Importing it would just cause the module to import itself.
       ([{- (textToPascalName objectName , [textToPascalName $ objectName <> "_id"])-}], (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ var (fromString $ textToPascalName (objectName <> "_id"))), [])
@@ -431,18 +442,18 @@ schemaToField gs required objectName (n, Inline s)
                  _           -> var "Amount"
       in ([], (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ ty), [])
 -- schemaToField _ (n , Ref _)   = ((textToOccName n, strict $ field $ var "FixMe3"), [])
-schemaToField gs required objectName (n , Ref (Reference r))   =
+schemaToField gs wrapPrim required objectName (n , Ref (Reference r))   =
   ([(textToPascalName r, [textToPascalName r])], (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ var $ textToPascalName r ), [])
 {-
 schemaToField gs required objectName (n, Inline s)
-  | (isJust $ _schemaEnum s) = error $ show (n, s)
+  | (isJust $ _schemaEnum s) && objectName == "mandate" = error $ show (n, s)
 -}
 -- schemaToField gs required objectName (n, Inline s)
 --  | n == "discounts" = error $ show (n, s)
 
-schemaToField gs required objectName (n, Inline s) =
+schemaToField gs wrapPrim required objectName (n, Inline s) =
    let (imports, ty, _decls) = schemaToType gs objectName n s
-       (imports', decls) = schemaToTypeDecls gs objectName n s
+       (imports', decls) = schemaToTypeDecls gs wrapPrim objectName n s
    in (imports ++ imports', (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ ty) , decls)
 
 {- check for stuff like this,
@@ -516,8 +527,11 @@ data GenStyle
 derivingCommon' AllDeclarations = derivingCommon
 derivingCommon' HsBoot          = []
 
-schemaToTypeDecls :: GenStyle -> Text -> Text -> Schema -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'])
-schemaToTypeDecls gs objName tyName s
+{-
+We generating an Object -- we probably do not need to wrap ever Text and Bool in a newtype. But we do need to wrap those values when they are being used as parameters to a request. This code does not currently distinguish those situations"
+-}
+schemaToTypeDecls :: GenStyle -> Bool -> Text -> Text -> Schema -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'])
+schemaToTypeDecls gs wrapPrim objName tyName s
   -- types which are manually defined in Types
   | tyName `elem` [ "expand", "metadata" ] = ([], [])
   | tyName `elem` ["lines", "line_items", "use_stripe_sdk", "refunds", "customer_id", {- "automatic_tax", -} "currency"] = ([], [])
@@ -548,6 +562,8 @@ schemaToTypeDecls gs objName tyName s
         False -> error "expected default_tax_rate to be a Maybe String. Perhaps the specification has changed?"
         True -> mkNewtypeParam tyName (var "Emptyable" @@ var "AccountId")
 -}
+    -- just a plain old text field -- no enumeration
+  | _schemaType s == Just OpenApiString && (isNothing $ _schemaEnum s) && (not wrapPrim) = ([],[])
   | _schemaType s == Just OpenApiString =
       ([], snd $ schemaToEnumDecl objName tyName s)
       -- ([], []) --
@@ -577,7 +593,10 @@ schemaToTypeDecls gs objName tyName s
               case _schemaAnyOf s of
                 (Just [Inline schema1, Inline schema2])
                   | isEmptyEnum schema2 ->
-                      schemaToTypeDecls gs "NoObjectName" tyName schema1
+                      schemaToTypeDecls gs wrapPrim "NoObjectName" tyName schema1
+                -- if the AnyOf only contains a single item, why bother wrapping it up?
+                (Just [Ref schema1]) ->
+                  ([],[])
                 (Just schemas) ->
 --                  mkSumType tyName schemas --
                   let (imports, types, decls) = unzip3 $ map (referencedSchemaToType gs objName "FixMe6") schemas
@@ -614,27 +633,34 @@ schemaToTypeDecls gs objName tyName s
               ([], [])
             --  error $ show er
 
-  | _schemaType s == Just OpenApiInteger =
-      let occName = fromString (textToPascalName $ tyName)
-          con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Integer" ) ]
-      in ([], [ newtype' occName [] con (derivingCommon' gs) ])
-  -- FIXME: should we use a Decimal type instead of Double?
-  | _schemaType s == Just OpenApiNumber =
-      let occName = fromString (textToPascalName $ tyName)
-          con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Double" ) ]
-      in ([], [ newtype' occName [] con (derivingCommon' gs) ])
+  | (_schemaType s == Just OpenApiInteger) =
+      if wrapPrim
+      then let occName = fromString (textToPascalName $ tyName)
+               con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Integer" ) ]
+           in ([], [ newtype' occName [] con (derivingCommon' gs) ])
+      else ([],[])
 
-  | _schemaType s == Just OpenApiBoolean =
-      let occName = fromString (textToPascalName $ tyName)
-          con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Bool" ) ]
-      in ([], [ newtype' occName [] con (derivingCommon' gs) ])
+  -- FIXME: should we use a Decimal type instead of Double?
+  | (_schemaType s == Just OpenApiNumber) =
+      if wrapPrim
+      then let occName = fromString (textToPascalName $ tyName)
+               con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Double" ) ]
+           in ([], [ newtype' occName [] con (derivingCommon' gs) ])
+      else ([],[])
+
+  | (_schemaType s == Just OpenApiBoolean) =
+      if wrapPrim
+      then let occName = fromString (textToPascalName $ tyName)
+               con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Bool" ) ]
+           in ([], [ newtype' occName [] con (derivingCommon' gs) ])
+      else ([],[])
 
   | _schemaType s == Just OpenApiArray =
       case _schemaItems s of
         {-
         Just (OpenApiItemsObject (Ref (Reference r))) ->
           ([textToPascalName r], var "StripeList" @@ (var $ textToPascalName r), [])
--}
+        -}
         Just (OpenApiItemsObject (Inline s))
           | _schemaType s == Just OpenApiString ->
               let occName = fromString (textToPascalName $ tyName)
@@ -642,6 +668,8 @@ schemaToTypeDecls gs objName tyName s
           in ([], (data' occName [] [con] (derivingCommon' gs)) : []) -- : concat decls
 
         Just (OpenApiItemsObject (Inline s)) ->
+          ([],[])
+          {-
           let -- decls' = schemaToTypeDecls "FixMe4a" "FixMe4b" s
               entryTy = case _schemaTitle s of
                           (Just t) -> t
@@ -651,7 +679,7 @@ schemaToTypeDecls gs objName tyName s
                             in ty
 -}
               entryTyName = textToPascalName entryTy
-              (entryImports, entryFields, entryDecls) =  unzip3 $ map (schemaToField gs (_schemaRequired s) tyName) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
+              (entryImports, entryFields, entryDecls) =  unzip3 $ map (schemaToField gs wrapPrim (_schemaRequired s) tyName) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
               entryCon = recordCon entryTyName entryFields
               entryDecl = data' entryTyName [] [entryCon] (derivingCommon' gs)
 
@@ -660,14 +688,15 @@ schemaToTypeDecls gs objName tyName s
 
               con = recordCon occName [(fromString $ "un" <> textToPascalName tyName, field $ listTy $ var $ textToPascalName entryTy)]
           in (concat entryImports , entryDecl : (data' occName [] [con] (derivingCommon' gs)) : concat entryDecls) -- : concat decls
-
+ -}
         _ -> trace "We should probably actually do something here. 1." ([], [])
 
+    -- the assumption here is that we are generating a record for an object?
   | otherwise =
       let name = tyName
           occName = fromString (textToPascalName name)
 --          (fields, decls) =  unzip $ map (schemaToField (fromMaybe "FixMe2b" (_schemaTitle s))) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
-          (imports, fields, decls) =  unzip3 $ map (schemaToField gs (_schemaRequired s) name) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
+          (imports, fields, decls) =  unzip3 $ map (schemaToField gs wrapPrim (_schemaRequired s) name) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
           con = recordCon occName fields
       in case gs of
            AllDeclarations -> (concat imports, (data' occName [] [con] (derivingCommon' gs))  : concat decls)
@@ -770,7 +799,7 @@ mkStripeHasParamFromProperty modBaseName opName (pName, r@(Inline schema)) =
               (if pn `elem` [ "Metadata" ] then [] else [ instance' (var "ToStripeParam" @@ (var pn)) []])
 
 --      (_, insts) = mkStripeHasParam opName Nothing r
-      (imports, decls) = schemaToTypeDecls AllDeclarations "FixMeHasParamFromProperty1" pName schema
+      (imports, decls) = schemaToTypeDecls AllDeclarations True "FixMeHasParamFromProperty1" pName schema
       tys = InsOrd.fromList [(pName, decls)]
       ownMod
         | needsOwnModule schema = Just $ modBaseName <> (NonEmpty.singleton $ textToPascalName pName)
@@ -1266,7 +1295,7 @@ mkObject gs (objName', schema) =
         -- "automatic_tax" ->  "automatic_tax_object" -- why??
         _               -> objName'
   in {- (mkFromJSON objName schema) : -}
-      (schemaToTypeDecls gs objName objName schema)
+      (schemaToTypeDecls gs False objName objName schema)
 
 mkComponents :: OpenApi -> IO ()
 mkComponents oa =
