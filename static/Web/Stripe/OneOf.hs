@@ -20,6 +20,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE OverlappingInstances #-}
 
 
 module Web.Stripe.OneOf where
@@ -57,12 +58,16 @@ deriving instance Typeable (OneOf (n :: [Type]))
 instance Show (OneOf '[]) where
   show Empty = "{}"
 
+instance (Show e, Typeable e, Show (OneOf s)) => Show (OneOf (e ': s)) where
+  show (Val e) = "(Val (" <> show e <> " :: " <> show (typeOf e) <> "))"
+  show (NoVal o) = show o
+  show Empty  = "{}"
 
-instance (Typeable a) => Data (OneOf a)
 instance Read (OneOf a)
+instance (Typeable a) => Data (OneOf (a :: [Type]))
+
 instance FromJSON (OneOf a) where
   parseJSON _ = error "undefined"
-
 
 type family DeleteList e xs where
   DeleteList x '[] = '[]
@@ -73,10 +78,6 @@ type family DeleteOneOf e xs where
   DeleteOneOf x (OneOf ys) = OneOf (DeleteList x ys)
 
 -- > runExcept (throwMember (1.5 :: Float) :: ExceptT (OneOf '[S
-instance (Show e, Typeable e, Show (OneOf s)) => Show (OneOf (e ': s)) where
-  show (Val e) = "(Val (" <> show e <> " :: " <> show (typeOf e) <> "))"
-  show (NoVal o) = show o
-  show Empty  = "{}"
 
 instance (Ord (OneOf s)) => Eq (OneOf s) where
   a == b = compare a b == EQ

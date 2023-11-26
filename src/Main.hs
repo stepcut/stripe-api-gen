@@ -215,11 +215,12 @@ schemaToType gs objName n s =
     _           -> (imports, ty, decls)
 
 -- merge this with mkEnums
-schemaToEnumDecl :: Text    -- ^ objName -- used for disambiguation
+schemaToEnumDecl :: Bool
+                 -> Text    -- ^ objName -- used for disambiguation
                  -> Text    -- ^ enum name
                  -> Schema  -- ^ enum schema
                  -> (HsType', [HsDecl'])
-schemaToEnumDecl objNm nm s
+schemaToEnumDecl instToStripeParam objNm nm s
   | nm == "object" = (var "FixMeSchemaToEnumDecl", [])
 --       (textToPascalName "stripe_object", [ data' (textToPascalName "stripe_object") [] [ prefixCon (textToPascalName ("object_" <> c)) [] | c <- Set.toList conNms ] (derivingCommon' AllDeclarations) ])
 
@@ -249,8 +250,20 @@ schemaToEnumDecl objNm nm s
                       True -> (nm <> "_" <> conName)
                       _ -> conName
                   occNam = textToPascalName $ withPrefixType nm
+                  matches = [ match [ bvar (textToPascalName $ withPrefixCon c) ] (string $ T.unpack (withPrefixCon c)) | (Aeson.String c) <- vs ]
+                  inst = if instToStripeParam
+                         then [ instance' ((var "ToStripeParam") @@ (var (textToPascalName $ withPrefixType nm)))
+                                  [ funBinds "toStripeParam" [ match [ bvar "c" ]
+                                                               ( var ":" @@ (tuple [string $ T.unpack $ withPrefixType nm,
+                                                                                    case' (var "c") matches
+                                                                                   ]))
+                                                             ]
+                               ]
+                              ]
+                         else []
+
                   cons   = [ prefixCon (textToPascalName $ withPrefixCon c) [] | (Aeson.String c) <- vs ]
-              in (var (fromString occNam), [data' (fromString occNam) [] cons derivingCommon])
+              in (var (fromString occNam), (data' (fromString occNam) [] cons derivingCommon) : inst)
         Nothing ->
           let typName = textToPascalName nm
               cons     = [ recordCon (fromString $ textToPascalName nm) [ ((fromString $ "un" <> textToPascalName nm)
@@ -258,7 +271,16 @@ schemaToEnumDecl objNm nm s
                                                                           )
                                                                         ]
                          ]
-          in (var (fromString typName) , [data' (fromString typName) [] cons derivingCommon])
+              inst = if instToStripeParam
+                          then [ instance' ((var "ToStripeParam") @@ (var (textToPascalName nm)))
+                                  [ funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName nm)) [ bvar "t" ] ]
+                                                               ( var ":" @@ (tuple [string $ T.unpack nm
+                                                                                   , var "unpack" @@ var "t"
+                                                                                   ]) )
+                                                             ] ]
+                               ]
+                          else []
+          in (var (fromString typName) , (data' (fromString typName) [] cons derivingCommon) : inst)
 
 {-
 
@@ -304,6 +326,7 @@ schemaToType' gs p n s
 
   | (_schemaType s == Just OpenApiInteger) && (_schemaFormat s == Just "unix-time") =
       ([], var "UTCTime", [])
+
   | (_schemaType s == Just OpenApiInteger) =
       case _schemaFormat s of
         (Just "int32") -> ([], var "Int32", [])
@@ -367,7 +390,7 @@ schemaToType' gs p n s
                 Nothing -> error "Expected 'lines' to have a data property"
 
             _ ->
-              let (imports, decls) = schemaToTypeDecls gs False p n s
+              let (imports, decls) = schemaToTypeDecls gs False False p n s
               in (imports, var (fromString $ textToPascalName n), decls)
   | isJust (_schemaAnyOf s) =
       case _schemaAnyOf s of
@@ -431,8 +454,8 @@ mkRequired True a = a
 mkRequired False a = var "Maybe" @@ a
 
 -- when do we use _schemaNullable and when do we use _schemaRequired?
-schemaToField :: GenStyle -> Bool -> [ParamName] -> Text -> (Text, Referenced Schema) -> ([(RdrNameStr, [RdrNameStr])], (OccNameStr, Field), [HsDecl'])
-schemaToField gs wrapPrim required objectName (n, Inline s)
+schemaToField :: GenStyle -> Bool -> Bool -> [ParamName] -> Text -> (Text, Referenced Schema) -> ([(RdrNameStr, [RdrNameStr])], (OccNameStr, Field), [HsDecl'])
+schemaToField gs wrapPrim instStripeParam required objectName (n, Inline s)
   | n == "id" && _schemaType s == Just OpenApiString =
       -- we don't need to import this id because it is an id that is defined in the local module. Importing it would just cause the module to import itself.
       ([{- (textToPascalName objectName , [textToPascalName $ objectName <> "_id"])-}], (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ var (fromString $ textToPascalName (objectName <> "_id"))), [])
@@ -442,7 +465,7 @@ schemaToField gs wrapPrim required objectName (n, Inline s)
                  _           -> var "Amount"
       in ([], (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ ty), [])
 -- schemaToField _ (n , Ref _)   = ((textToOccName n, strict $ field $ var "FixMe3"), [])
-schemaToField gs wrapPrim required objectName (n , Ref (Reference r))   =
+schemaToField gs wrapPrim instStripeParam required objectName (n , Ref (Reference r))   =
   ([(textToPascalName r, [textToPascalName r])], (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ var $ textToPascalName r ), [])
 {-
 schemaToField gs required objectName (n, Inline s)
@@ -451,9 +474,9 @@ schemaToField gs required objectName (n, Inline s)
 -- schemaToField gs required objectName (n, Inline s)
 --  | n == "discounts" = error $ show (n, s)
 
-schemaToField gs wrapPrim required objectName (n, Inline s) =
+schemaToField gs wrapPrim instStripeParam required objectName (n, Inline s) =
    let (imports, ty, _decls) = schemaToType gs objectName n s
-       (imports', decls) = schemaToTypeDecls gs wrapPrim objectName n s
+       (imports', decls) = schemaToTypeDecls gs wrapPrim instStripeParam objectName n s
    in (imports ++ imports', (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ ty) , decls)
 
 {- check for stuff like this,
@@ -530,8 +553,8 @@ derivingCommon' HsBoot          = []
 {-
 We generating an Object -- we probably do not need to wrap ever Text and Bool in a newtype. But we do need to wrap those values when they are being used as parameters to a request. This code does not currently distinguish those situations"
 -}
-schemaToTypeDecls :: GenStyle -> Bool -> Text -> Text -> Schema -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'])
-schemaToTypeDecls gs wrapPrim objName tyName s
+schemaToTypeDecls :: GenStyle -> Bool -> Bool -> Text -> Text -> Schema -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'])
+schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
   -- types which are manually defined in Types
   | tyName `elem` [ "expand", "metadata" ] = ([], [])
   | tyName `elem` ["lines", "line_items", "use_stripe_sdk", "refunds", "customer_id", {- "automatic_tax", -} "currency"] = ([], [])
@@ -565,7 +588,7 @@ schemaToTypeDecls gs wrapPrim objName tyName s
     -- just a plain old text field -- no enumeration
   | _schemaType s == Just OpenApiString && (isNothing $ _schemaEnum s) && (not wrapPrim) = ([],[])
   | _schemaType s == Just OpenApiString =
-      ([], snd $ schemaToEnumDecl objName tyName s)
+      ([], snd $ schemaToEnumDecl instToStripeParam objName tyName s)
       -- ([], []) --
 
   | isJust (_schemaAnyOf s) =
@@ -593,7 +616,7 @@ schemaToTypeDecls gs wrapPrim objName tyName s
               case _schemaAnyOf s of
                 (Just [Inline schema1, Inline schema2])
                   | isEmptyEnum schema2 ->
-                      schemaToTypeDecls gs wrapPrim "NoObjectName" tyName schema1
+                      schemaToTypeDecls gs wrapPrim instToStripeParam "NoObjectName" tyName schema1
                 -- if the AnyOf only contains a single item, why bother wrapping it up?
                 (Just [Ref schema1]) ->
                   ([],[])
@@ -608,6 +631,7 @@ schemaToTypeDecls gs wrapPrim objName tyName s
                       instances =
                         if (tyName `elem` ["balance_transaction_source", "payment_source"])
                                then [instance' (var n @@ (var "Expandable" @@ (var $ textToPascalName tyName))) [] | n <- derivingNames ]
+--                               then [standaloneDeriving (var n @@ (var "Expandable" @@ (var $ textToPascalName tyName))) | n <- derivingNames ]
                                else []
 
                       dataDecls =
@@ -637,7 +661,15 @@ schemaToTypeDecls gs wrapPrim objName tyName s
       if wrapPrim
       then let occName = fromString (textToPascalName $ tyName)
                con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Integer" ) ]
-           in ([], [ newtype' occName [] con (derivingCommon' gs) ])
+               inst = if instToStripeParam
+                          then [ instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
+                                  [ funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "n" ] ]
+                                                               ( var ":" @@ (tuple [string $ T.unpack tyName, var "toBytestring" @@ var "n"
+                                                                                   ]) )
+                                                             ] ]
+                               ]
+                          else []
+           in ([], newtype' occName [] con (derivingCommon' gs) : inst)
       else ([],[])
 
   -- FIXME: should we use a Decimal type instead of Double?
@@ -645,14 +677,30 @@ schemaToTypeDecls gs wrapPrim objName tyName s
       if wrapPrim
       then let occName = fromString (textToPascalName $ tyName)
                con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Double" ) ]
-           in ([], [ newtype' occName [] con (derivingCommon' gs) ])
+               inst = if instToStripeParam
+                          then [ instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
+                                  [ funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "n" ] ]
+                                                               ( var ":" @@ (tuple [string $ T.unpack tyName, var "toBytestring" @@ var "n"
+                                                                                   ]) )
+                                                             ] ]
+                               ]
+                          else []
+           in ([], (newtype' occName [] con (derivingCommon' gs) : inst))
       else ([],[])
 
   | (_schemaType s == Just OpenApiBoolean) =
       if wrapPrim
       then let occName = fromString (textToPascalName $ tyName)
                con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Bool" ) ]
-           in ([], [ newtype' occName [] con (derivingCommon' gs) ])
+               inst = if instToStripeParam
+                          then [ instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
+                                  [ funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "b" ] ]
+                                                               ( var ":" @@ (tuple [string $ T.unpack tyName, (if' (var "b") (string "true") (string "false"))
+                                                                      ]) )
+                                                             ] ]
+                               ]
+                          else []
+           in ([], (newtype' occName [] con (derivingCommon' gs)) : inst)
       else ([],[])
 
   | _schemaType s == Just OpenApiArray =
@@ -696,7 +744,7 @@ schemaToTypeDecls gs wrapPrim objName tyName s
       let name = tyName
           occName = fromString (textToPascalName name)
 --          (fields, decls) =  unzip $ map (schemaToField (fromMaybe "FixMe2b" (_schemaTitle s))) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
-          (imports, fields, decls) =  unzip3 $ map (schemaToField gs wrapPrim (_schemaRequired s) name) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
+          (imports, fields, decls) =  unzip3 $ map (schemaToField gs wrapPrim instToStripeParam (_schemaRequired s) name) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
           con = recordCon occName fields
       in case gs of
            AllDeclarations -> (concat imports, (data' occName [] [con] (derivingCommon' gs))  : concat decls)
@@ -772,7 +820,11 @@ mkParamName s p =
     textToName
       | s == Camel = textToCamelName
       | s == Pascal = textToPascalName
-
+{-
+mkToStripeParam paramNm =
+  instance' (var "ToStripeParam" @@  (var paramNm))
+    [ funBinds "toStripeParam" [ match [ conP (mkParamName Pascal $ _paramName param) [ bvar "v" ] ] (var "id") ]
+  -}  
 mkStripeHasParam :: OccNameStr -> Maybe Text -> Referenced Param -> (RdrNameStr, [HsDecl'])
 mkStripeHasParam opName mIdName (Inline param) =
   let paramNm = mkParamName Pascal $ _paramName param
@@ -780,7 +832,8 @@ mkStripeHasParam opName mIdName (Inline param) =
      then case mIdName of
             Nothing -> error $ "mkStripeHasParam: expect an idName but got Nothing. opName = " ++ show opName ++ " , param = " ++ show (ppParam param)
             (Just idName) -> (textToPascalName idName, [ instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var paramNm @@ (var $ textToPascalName idName))) []])
-     else (paramNm, [ instance' (var "ToStripeParam" @@  (var paramNm)) []
+     else (paramNm, [ instance' (var "ToStripeParam" @@  (var paramNm))
+                       [ funBinds "toStripeParam" [ match [ conP (mkParamName Pascal $ _paramName param) [ bvar "v" ] ] (var "id") ] ]
                     , instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var $ paramNm)) []
                     ])
 
@@ -789,6 +842,11 @@ needsOwnModule s =
   (not $ InsOrd.null (_schemaProperties s)) ||
   (not $ null $ _schemaItems s)
 
+mkToStripeParam :: Text -> Schema -> HsDecl'
+mkToStripeParam pName schema =
+  let pn = mkParamName Pascal pName
+  in instance' (var "ToStripeParam" @@ (var pn)) []
+
 mkStripeHasParamFromProperty :: NonEmpty String -- ^ module name -- just the last bit like 'Account'
                              -> OccNameStr
                              -> (Text, (Referenced Schema))
@@ -796,10 +854,15 @@ mkStripeHasParamFromProperty :: NonEmpty String -- ^ module name -- just the las
 mkStripeHasParamFromProperty modBaseName opName (pName, r@(Inline schema)) =
   let pn = mkParamName Pascal pName
       insts = (instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var pn)) []) :
-              (if pn `elem` [ "Metadata" ] then [] else [ instance' (var "ToStripeParam" @@ (var pn)) []])
+              (if pn `elem` [ "Metadata" ] then [] else [{- mkToStripeParam pName schema -}])
+{-                 [ instance' (var "ToStripeParam" @@ (var pn))
+                   [ {- funBinds "toStripeParam" [ match [ conP (mkParamName Pascal pName) [ bvar "v" ] ]
+(var "id")
+                                                                                     ] -}
+                                                          ]]) -}
 
 --      (_, insts) = mkStripeHasParam opName Nothing r
-      (imports, decls) = schemaToTypeDecls AllDeclarations True "FixMeHasParamFromProperty1" pName schema
+      (imports, decls) = schemaToTypeDecls AllDeclarations True True "FixMeHasParamFromProperty1" pName schema
       tys = InsOrd.fromList [(pName, decls)]
       ownMod
         | needsOwnModule schema = Just $ modBaseName <> (NonEmpty.singleton $ textToPascalName pName)
@@ -890,7 +953,7 @@ mkUrl idName (pt:pts) =
   in (patTys', op expl "</>" expr)
 
 -- for the specified Operation, create a function that creates a `StripeRequest`
-mkRequestDecl :: FilePath -> Method -> Maybe Text -> Operation -> [ParamName] -> ([HsDecl'], [RdrNameStr])
+mkRequestDecl :: FilePath -> Method -> Maybe Text -> Operation -> [ParamName] -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [RdrNameStr])
 mkRequestDecl path method idName oper requiredParams =
   let opName :: OccNameStr
       opName   = textToCamelName $ fromJust $ _operationOperationId oper
@@ -902,7 +965,8 @@ mkRequestDecl path method idName oper requiredParams =
       pathTemplate = extractTemplate (T.pack path)
       (patTys, urlE) = mkUrl idName pathTemplate
 --      (pats, typs) :: ([Pat'], [HsType'])
-      requiredParamTypes = map (var . mkParamName Pascal) requiredParams
+      requiredParamTypes   = map (var . mkParamName Pascal) requiredParams
+      requiredParamImports = map (\p -> (fromString ((textToPascalName p)), [ mkParamName Pascal p])) requiredParams
       requiredParamPats :: [Pat']
       requiredParamPats   = map (bvar . mkParamName Camel) requiredParams
       requiredParamVars :: [HsExpr']
@@ -924,9 +988,10 @@ mkRequestDecl path method idName oper requiredParams =
           ps -> extractTemplate (pats, valBind "url" (mkUrlFromPaths ps))
       -}
       params  = valBind "params" (foldr (\v l -> (var "toStripeParam") @@ v @@ l) (var "[]") requiredParamVars)
-  in  ([ typeSig opName ty
-       , funBind opName (matchGRHSs (requiredParamPats ++ pats) (rhs (var "request") `where'` [request, url, params]))
-       ]
+  in  (requiredParamImports
+      , [ typeSig opName ty
+        , funBind opName (matchGRHSs (requiredParamPats ++ pats) (rhs (var "request") `where'` [request, url, params]))
+        ]
       , [ opName', textToCamelName $ fromJust $ _operationOperationId oper ]
       )
 {-
@@ -976,7 +1041,7 @@ mkOperation modBaseName path method mIdName op =
             case InsOrd.lookup 200 (_responsesResponses (_operationResponses op)) of
               (Just (Inline resp)) -> responseType resp
 
-      (requestDecl, requestTypes) = mkRequestDecl path method mIdName op requiredParams
+      (requestDeclImports, requestDecl, requestTypes) = mkRequestDecl path method mIdName op requiredParams
 
       stripeReturnDecl = tyFamInst "StripeReturn" [var $ UnqualStr opName] returnTy
 
@@ -987,7 +1052,7 @@ mkOperation modBaseName path method mIdName op =
         case mIdName of
           Nothing -> id
           (Just idName) -> (textToPascalName idName :)
-  in (Nothing, (concat paramImports, (requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls)), [] )) :
+  in (Nothing, (requestDeclImports ++ returnImports ++ concat paramImports, (requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls)), [] )) :
      (map (\(mModBase, pathImports, instanceDecls, typeDecls) -> (mModBase, (pathImports, (concatMap snd $ InsOrd.toList typeDecls) ++ instanceDecls, []))) ownModDecls)
                                                                             -- (fromJust mModBase, pathImports, instanceDecls, concatMap snd $ concatMap InsOrd.toList typeDecls))) ownModDecls)
 
@@ -1063,7 +1128,7 @@ mkOwnMods (Just modBaseName, decls) =
 
 mkPathModule modBaseName pathImports decls exports =
   do let imports = [ import' "Data.Data" `exposing` [ var "Data" ]
-                   , import' "Data.Text" `exposing` [ var "Text" ]
+                   , import' "Data.Text" `exposing` [ var "Text", var "unpack" ]
                    , import' "Web.Stripe.StripeRequest" `exposing`
                        [ thingAll "Method"
                        , thingWith "StripeHasParam" []
@@ -1083,7 +1148,8 @@ mkPathModule modBaseName pathImports decls exports =
                         , thingAll "Limit"
                         , thingAll "NowOrLater"
                         ]
-                   , import' "Web.Stripe.Util" `exposing` [var "(</>)"]
+                   , import' "Web.Stripe.Util" `exposing` [ var "(</>)"
+                                                          ]
                    ] ++ (map mkImport ({- propImports ++ -} pathImports))
          exports = Nothing
          modul  = module' (Just $ fromString $ "Web.Stripe." <> foldr1 (\a b -> a <> "." <> b) modBaseName) exports imports decls
@@ -1123,7 +1189,9 @@ mkPaths oa paths modBaseName =
                      , var "mkStripeRequest"
                      ]
                    , import' "Web.Stripe.Types" `exposing` (thingWith "Currency" [] : thingAll "Emptyable" : thingAll "ExpandParams" : thingAll "Metadata" : thingAll "StripeList" : thingAll "StartingAfter": thingAll "EndingBefore" : thingAll "Limit" : thingAll "NowOrLater" : [] {- (nub reexportTypes) -} )
-                   , import' "Web.Stripe.Util" `exposing` [var "(</>)"]
+                   , import' "Web.Stripe.Util" `exposing` [ var "(</>)"
+                                                          , var "toBytestring"
+                                                          ]
                    ] ++ (map mkImport ({- propImports ++ -} pathImports))
          modul  = module' (Just $ fromString $ "Web.Stripe." <> foldr1 (\a b -> a <> "." <> b) modBaseName) exports imports (opDecls {- ++ propDecls -})
          extensions = [ FlexibleInstances
@@ -1276,7 +1344,8 @@ mkId gs baseName =
                     ]
                   , typeInstance' ("ExpandsTo "<> T.unpack (textToPascalName (baseName <> "_id")))  hsOuterImplicit [] Prefix (var $ fromString $ T.unpack $ textToPascalName baseName)
                   ] ++
-                  [ instance' (var cn @@ (var "Expandable" @@ (var $ fromString $ T.unpack n))) [] | cn <- derivingNames  ]
+                  [ standaloneDeriving (var cn @@ (var "Expandable" @@ (var $ fromString $ T.unpack n)) )  | cn <- derivingNames  ]
+--                  [ instance' (var cn @@ (var "Expandable" @@ (var $ fromString $ T.unpack n))) [] | cn <- derivingNames  ]
              else [instance' (var cn @@ (var "Expandable" @@ (var $ fromString $ T.unpack n))) [] | cn <- derivingNames ]
       -- FIXME: this is definitely not the right way to call typeInstance'
 
@@ -1295,7 +1364,7 @@ mkObject gs (objName', schema) =
         -- "automatic_tax" ->  "automatic_tax_object" -- why??
         _               -> objName'
   in {- (mkFromJSON objName schema) : -}
-      (schemaToTypeDecls gs False objName objName schema)
+      (schemaToTypeDecls gs False False objName objName schema)
 
 mkComponents :: OpenApi -> IO ()
 mkComponents oa =
