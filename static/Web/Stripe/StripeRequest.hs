@@ -104,11 +104,16 @@ data StripeRequest a = StripeRequest
     , endpoint    :: Text   -- ^ Endpoint of StripeRequest
     , queryParams :: Params -- ^ Query Parameters of StripeRequest
     }
+    deriving (Eq, Ord, Read, Show)
 
 ------------------------------------------------------------------------------
 -- | convert a parameter to a key/value
 class ToStripeParam param where
   toStripeParam :: param -> [(ByteString, ByteString)] -> [(ByteString, ByteString)]
+
+instance ToStripeParam Currency where
+  toStripeParam currency =
+    (("currency", toBytestring currency) :)
 
 instance ToStripeParam ExpandParams where
   toStripeParam (ExpandParams params) =
@@ -149,6 +154,7 @@ instance ToStripeParam Amount where
 instance ToStripeParam Metadata where
   toStripeParam (Metadata kvs) =
     (toMetaData kvs ++)
+
 
 {-
 instance ToStripeParam AmountOff where

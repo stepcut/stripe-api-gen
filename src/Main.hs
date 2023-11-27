@@ -275,7 +275,7 @@ schemaToEnumDecl instToStripeParam objNm nm s
                           then [ instance' ((var "ToStripeParam") @@ (var (textToPascalName nm)))
                                   [ funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName nm)) [ bvar "t" ] ]
                                                                ( var ":" @@ (tuple [string $ T.unpack nm
-                                                                                   , var "unpack" @@ var "t"
+                                                                                   , var "encodeUtf8" @@ var "t"
                                                                                    ]) )
                                                              ] ]
                                ]
@@ -609,7 +609,16 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                    conName   = fromString (textToPascalName tyName)
                    unConName = fromString ("un" <> textToPascalName tyName)
                    con       = recordCon occName [ ( unConName, field $ var "NowOrLater") ]
-               in ([], [ newtype' occName [] con (derivingCommon' gs) ])
+                   inst      = if instToStripeParam
+                                  then [instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
+                                        [ {- funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "n" ] ]
+                                                               ( var ":" @@ (tuple [string $ T.unpack tyName, var "toBytestring" @@ var "n"
+                                                                                   ]) )
+                                                             ] ] -}
+                                        ]
+                                       ]
+                                  else []
+               in ([], (newtype' occName [] con (derivingCommon' gs) : inst))
         _ ->
           case InsOrd.lookup "expansionResources" (_unDefs $ _schemaExtensions s) of
             Nothing ->
@@ -713,7 +722,15 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
           | _schemaType s == Just OpenApiString ->
               let occName = fromString (textToPascalName $ tyName)
                   con = recordCon occName [(fromString $ "un" <> textToPascalName tyName, field $ listTy $ var "Text")]
-          in ([], (data' occName [] [con] (derivingCommon' gs)) : []) -- : concat decls
+                  inst = if instToStripeParam
+                          then [ instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
+                                  [ {- funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "b" ] ]
+                                                               ( var ":" @@ (tuple [string $ T.unpack tyName, (if' (var "b") (string "true") (string "false"))
+                                                                      ]) )
+                                                             ] -} ]
+                               ]
+                          else []
+          in ([], (newtype' occName [] con (derivingCommon' gs)) : inst) -- : concat decls
 
         Just (OpenApiItemsObject (Inline s)) ->
           ([],[])
@@ -737,7 +754,8 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
               con = recordCon occName [(fromString $ "un" <> textToPascalName tyName, field $ listTy $ var $ textToPascalName entryTy)]
           in (concat entryImports , entryDecl : (data' occName [] [con] (derivingCommon' gs)) : concat entryDecls) -- : concat decls
  -}
-        _ -> trace "We should probably actually do something here. 1." ([], [])
+        _ -> trace "We should probably actually do something here. 1." $
+                 ([], [])
 
     -- the assumption here is that we are generating a record for an object?
   | otherwise =
@@ -745,9 +763,17 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
           occName = fromString (textToPascalName name)
 --          (fields, decls) =  unzip $ map (schemaToField (fromMaybe "FixMe2b" (_schemaTitle s))) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
           (imports, fields, decls) =  unzip3 $ map (schemaToField gs wrapPrim instToStripeParam (_schemaRequired s) name) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
+          inst = if instToStripeParam
+                          then [ instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
+                                 [ {- funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "b" ] ]
+                                                               ( var ":" @@ (tuple [string $ T.unpack tyName, (if' (var "b") (string "true") (string "false"))
+                                                                      ]) )
+                                                             ] -} ] 
+                               ]
+                          else []
           con = recordCon occName fields
       in case gs of
-           AllDeclarations -> (concat imports, (data' occName [] [con] (derivingCommon' gs))  : concat decls)
+           AllDeclarations -> (concat imports, (data' occName [] [con] (derivingCommon' gs))  : (inst ++ concat decls))
            HsBoot -> ([], data' occName [] [] [] :
                           [instance' (var n @@ var (textToPascalName name)) [] | n <- derivingNames ]
                      )
@@ -1128,7 +1154,7 @@ mkOwnMods (Just modBaseName, decls) =
 
 mkPathModule modBaseName pathImports decls exports =
   do let imports = [ import' "Data.Data" `exposing` [ var "Data" ]
-                   , import' "Data.Text" `exposing` [ var "Text", var "unpack" ]
+                   , import' "Data.Text" `exposing` [ var "Text" ]
                    , import' "Web.Stripe.StripeRequest" `exposing`
                        [ thingAll "Method"
                        , thingWith "StripeHasParam" []
@@ -1180,6 +1206,7 @@ mkPaths oa paths modBaseName =
          exports = Just (nub $ {- reexportTypes ++ -} (map var (additionalExports)))
          imports = [ import' "Data.Data" `exposing` [ var "Data" ]
                    , import' "Data.Text" `exposing` [ var "Text" ]
+                   , import' "Data.Text.Encoding" `exposing` [ var "encodeUtf8" ]
                    , import' "Web.Stripe.StripeRequest" `exposing`
                      [ thingAll "Method"
                      , thingWith "StripeHasParam" []
@@ -1343,6 +1370,13 @@ mkId gs baseName =
                                            ]
                     ]
                   , typeInstance' ("ExpandsTo "<> T.unpack (textToPascalName (baseName <> "_id")))  hsOuterImplicit [] Prefix (var $ fromString $ T.unpack $ textToPascalName baseName)
+                  , instance' (var "ToStripeParam" @@ (var $ fromString $ T.unpack n))
+                      [ funBinds "toStripeParam" [ match [ conP (fromString $ T.unpack n) [ bvar "t" ] ]
+                                                               ( var ":" @@ (tuple [string $ T.unpack n
+                                                                                   , var "encodeUtf8" @@ var "t"
+                                                                                   ]) )
+                                                             ] ]
+
                   ] ++
                   [ standaloneDeriving (var cn @@ (var "Expandable" @@ (var $ fromString $ T.unpack n)) )  | cn <- derivingNames  ]
 --                  [ instance' (var cn @@ (var "Expandable" @@ (var $ fromString $ T.unpack n))) [] | cn <- derivingNames  ]
@@ -1447,11 +1481,15 @@ mkComponent component@(name, schema) =
            , import' "Data.Map"   `exposing` [ var "Map" ]
            , import' "Data.Ratio" `exposing` [ var "(%)" ]
            , import' "Data.Text"  `exposing` [ var "Text" ]
+           , import' "Data.Text.Encoding" `exposing` [ var "encodeUtf8" ]
            , import' "Data.Time"  `exposing` [ var "UTCTime" ]
 --           , import' "Numeric"  `exposing` [ var "fromRat" , var "showFFLoat" ]
            , import' "Text.Read"  `exposing` [ var "lexP", var "pfail" ]
            , qualified' $ import' "Text.Read" `as'` "R"
            , import' "Web.Stripe.OneOf" `exposing` [ thingAll "OneOf" ]
+           , import' "Web.Stripe.StripeRequest" `exposing`
+                       [ thingAll "ToStripeParam"
+                       ]
            , import' "Web.Stripe.Types"
            , import' "Web.Stripe.Util"  `exposing` [ var "fromSeconds" ]
            ]
@@ -1687,7 +1725,6 @@ mkTypes oa =
                                   , var "Typeable"
                                   ]
                       ]
-
                  , newtype' "Amount" [] (recordCon "Amount" [ ("getAmount", field $ var "Int") ]) derivingCommon
                  , instance' (var "FromJSON" @@ var "Amount") [ funBinds "parseJSON" [ match []  (var "undefined")] ]
                    -- emptyTimeRange
