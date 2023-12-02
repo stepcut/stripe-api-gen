@@ -611,10 +611,16 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                    con       = recordCon occName [ ( unConName, field $ var "NowOrLater") ]
                    inst      = if instToStripeParam
                                   then [instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
-                                        [ {- funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "n" ] ]
-                                                               ( var ":" @@ (tuple [string $ T.unpack tyName, var "toBytestring" @@ var "n"
-                                                                                   ]) )
-                                                             ] ] -}
+                                        [ funBinds "toStripeParam"
+                                          [ match [ conP "Now" [] ]
+                                            ( var ":" @@ (tuple [ string $ T.unpack tyName
+                                                                , string "now"
+                                                                ]) )
+                                          , match [ conP "Later" [ bvar "utc" ] ]
+                                            ( var ":" @@ (tuple [ string $ T.unpack tyName
+                                                                , var "toBytestring" @@ (var "toSeconds" @@ var "utc")
+                                                                ]) )
+                                          ]
                                         ]
                                        ]
                                   else []
@@ -1937,10 +1943,11 @@ main =
 
      mkTypes oa
      mkComponents oa
-#if 0
+
      -- Web.Stripe.Account
      mkPaths oa [("/v1/account", Just "AccountId")] (NonEmpty.singleton "Account")
-
+     mkPaths oa [("/v1/accounts", Just "AccountId")] (NonEmpty.singleton "Accounts")
+#if 0
 --     print [ t  | (t,s) <- findRequestBodyProperties oa ]
 
      -- Web.Stripe.ApplicationFees

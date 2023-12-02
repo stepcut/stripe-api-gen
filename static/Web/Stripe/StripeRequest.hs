@@ -155,7 +155,6 @@ instance ToStripeParam Metadata where
   toStripeParam (Metadata kvs) =
     (toMetaData kvs ++)
 
-
 {-
 instance ToStripeParam AmountOff where
   toStripeParam (AmountOff i) =
