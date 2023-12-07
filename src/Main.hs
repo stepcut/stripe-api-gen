@@ -225,9 +225,9 @@ schemaToEnumDecl :: MkToStripeParam
                  -> Text    -- ^ objName -- used for disambiguation
                  -> Text    -- ^ enum name
                  -> Schema  -- ^ enum schema
-                 -> (HsType', [HsDecl'])
+                 -> (HsType', [HsDecl'], [(Text, RawValBind)])
 schemaToEnumDecl instToStripeParam objNm nm s
-  | nm == "object" = (var "FixMeSchemaToEnumDecl", [])
+  | nm == "object" = (var "FixMeSchemaToEnumDecl", [], [])
 --       (textToPascalName "stripe_object", [ data' (textToPascalName "stripe_object") [] [ prefixCon (textToPascalName ("object_" <> c)) [] | c <- Set.toList conNms ] (derivingCommon' AllDeclarations) ])
 
   | nm == "version" && isJust (_schemaEnum s) =
@@ -235,12 +235,12 @@ schemaToEnumDecl instToStripeParam objNm nm s
           cons = [ prefixCon (textToPascalName $ "V" <> c) [] | (Aeson.String c) <- vs ]
           occName  = (textToPascalName (objNm <> "_"<> nm))
           occName' = (textToPascalName (objNm <> "_"<> nm))
-      in ((var occName ), [data' occName' [] cons derivingCommon])
+      in ((var occName ), [data' occName' [] cons derivingCommon], [])
   | _schemaType s == Just OpenApiString =
       case _schemaEnum s of
         (Just vs)
           | nm == "status" && ([ c | (Aeson.String c) <- vs] ==  [ "active", "inactive", "pending" ]) ->
-              (var "Status", [])
+              (var "Status", [], [])
           | otherwise ->
               let withPrefixType t =
                 -- FIXME: failure_code is usually a subset of this list
@@ -269,8 +269,31 @@ schemaToEnumDecl instToStripeParam objNm nm s
                                ]
                               ]
                            _ -> []
+                  toStripeParamBuilder =
+                    case instToStripeParam of
+                      HelperToStripeParam path ->
+                        let funName = T.concat (path ++ [nm])
+{-
+                            matches = [ match [ bvar (textToPascalName $ withPrefixCon c) ] (list (tuple [ string $ T.unpack $ mkKey (path ++ [nm])
+                                                                                                         , string $ T.unpack (withPrefixCon c)
+                                                                                                         ])) | (Aeson.String c) <- vs ]
+-}
+                            matches = [ match [ bvar (textToPascalName $ withPrefixCon c) ] (list [ tuple [ string $ T.unpack $ mkKey (path ++ [nm])
+                                                                                                          , string $ T.unpack (withPrefixCon c)
+                                                                                                          ] ])
+                                      | (Aeson.String c) <- vs ]
+ 
+                        in [( funName
+                            , funBind (fromString $ T.unpack funName)
+--                               (match [conP (fromString (textToPascalName $ tyName)) [ bvar "n" ]] (var "id")))
+--                               (match [ bvar "c" ] (case' (var "c") matches))
+                               (match [ bvar "c" ] (case' (var "c") matches))
+                            )
+                           ]
+                      _ -> []
+
                   cons   = [ prefixCon (textToPascalName $ withPrefixCon c) [] | (Aeson.String c) <- vs ]
-              in (var (fromString occNam), (data' (fromString occNam) [] cons derivingCommon) : inst)
+              in (var (fromString occNam), (data' (fromString occNam) [] cons derivingCommon) : inst, toStripeParamBuilder)
         Nothing ->
           let typName = textToPascalName nm
               cons     = [ recordCon (fromString $ textToPascalName nm) [ ((fromString $ "un" <> textToPascalName nm)
@@ -288,7 +311,7 @@ schemaToEnumDecl instToStripeParam objNm nm s
                                                              ] ]
                                ]
                        _ -> []
-          in (var (fromString typName) , (data' (fromString typName) [] cons derivingCommon) : inst)
+          in (var (fromString typName) , (data' (fromString typName) [] cons derivingCommon) : inst, [])
 
 {-
 
@@ -638,7 +661,8 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
     -- just a plain old text field -- no enumeration
   | _schemaType s == Just OpenApiString && (isNothing $ _schemaEnum s) && (not wrapPrim) = ([],[],[])
   | _schemaType s == Just OpenApiString =
-      ([], snd $ schemaToEnumDecl instToStripeParam objName tyName s, [])
+      let (_, d, b) = schemaToEnumDecl instToStripeParam objName tyName s
+      in ([], d, b)
       -- ([], []) --
 
   | isJust (_schemaAnyOf s) =
@@ -664,11 +688,11 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                                  TopToStripeParam ->
                                    [instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
                                         [ funBinds "toStripeParam"
-                                          [ match [ conP "Now" [] ]
+                                          [ match [ conP (textToPascalName tyName) [ conP "Now" []] ]
                                             ( var ":" @@ (tuple [ string $ T.unpack tyName
                                                                 , string "now"
                                                                 ]) )
-                                          , match [ conP "Later" [ bvar "utc" ] ]
+                                          , match [ conP (textToPascalName tyName) [ conP "Later" [ bvar "utc" ] ] ]
                                             ( var ":" @@ (tuple [ string $ T.unpack tyName
                                                                 , var "toBytestring" @@ (var "toSeconds" @@ var "utc")
                                                                 ]) )
@@ -740,12 +764,12 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                toStripeParamBuilder =
                     case instToStripeParam of
                       HelperToStripeParam path ->
-                        let funName = T.concat path
+                        let funName = T.concat (path ++ [tyName])
 --                        in [(funName, valBind (fromString $ T.unpack funName) (var "id"))]
                         in [( funName
                             , funBind (fromString $ T.unpack funName)
 --                               (match [conP (fromString (textToPascalName $ tyName)) [ bvar "n" ]] (var "id")))
-                               (match [ bvar "n" ] (tuple [string $ T.unpack $ mkKey (path ++ [tyName]), var "toBytestring" @@ var "n"]))
+                               (match [ bvar "n" ] (list [(tuple [string $ T.unpack $ mkKey (path ++ [tyName]), var "toBytestring" @@ var "n"])]))
                             )
                            ]
                       _ -> []
@@ -784,8 +808,20 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                                                              ] ]
                                ]
                         _ -> []
+               toStripeParamBuilder =
+                    case instToStripeParam of
+                      HelperToStripeParam path ->
+                        let funName = T.concat (path ++ [tyName])
+--                        in [(funName, valBind (fromString $ T.unpack funName) (var "id"))]
+                        in [( funName
+                            , funBind (fromString $ T.unpack funName)
+--                               (match [conP (fromString (textToPascalName $ tyName)) [ bvar "n" ]] (var "id")))
+                               (match [ bvar "n" ] (list [(tuple [string $ T.unpack $ mkKey (path ++ [tyName]), (if' (var "n") (string "true") (string "false"))])]))
+                            )
+                           ]
+                      _ -> []
 
-           in ([], (newtype' occName [] con (derivingCommon' gs)) : inst, [])
+           in ([], (newtype' occName [] con (derivingCommon' gs)) : inst, toStripeParamBuilder)
       else ([],[],[])
 
   | _schemaType s == Just OpenApiArray =
@@ -852,7 +888,8 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                      [ instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
                        [ funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) (map (bvar . fromString) varNms ) ]
                                                     (let' (map snd toStripeParamBuilders) $
-                                                     par (op (list (map (\(f,v) -> (var (fromString $ T.unpack f) @@ (var $ fromString v))) (zip (map fst toStripeParamBuilders) varNms))) "++" (var "")))
+--                                                     par (op (list (map (\(f,v) -> (var (fromString $ T.unpack f) @@ (var $ fromString v))) (zip (map fst toStripeParamBuilders) varNms))) "++" (var "")))
+                                                       par (op (par (var "concat" @@ (list (map (\(f,v) -> (var (fromString $ T.unpack f) @@ (var $ fromString v))) (zip (map fst toStripeParamBuilders) varNms))))) "++" (var "")))
                                                   ]
 {-                                 [ {- funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "b" ] ]
                                                                ( var ":" @@ (tuple [string $ T.unpack tyName, (if' (var "b") (string "true") (string "false"))
@@ -1310,6 +1347,7 @@ mkPaths oa paths modBaseName =
                    , import' "Web.Stripe.Types" `exposing` (thingWith "Currency" [] : thingAll "Emptyable" : thingAll "ExpandParams" : thingAll "Metadata" : thingAll "StripeList" : thingAll "StartingAfter": thingAll "EndingBefore" : thingAll "Limit" : thingAll "NowOrLater" : [] {- (nub reexportTypes) -} )
                    , import' "Web.Stripe.Util" `exposing` [ var "(</>)"
                                                           , var "toBytestring"
+                                                          , var "toSeconds"
                                                           ]
                    ] ++ (map mkImport ({- propImports ++ -} pathImports))
          modul  = module' (Just $ fromString $ "Web.Stripe." <> foldr1 (\a b -> a <> "." <> b) modBaseName) exports imports (opDecls {- ++ propDecls -})
