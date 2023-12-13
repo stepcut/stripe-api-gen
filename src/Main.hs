@@ -252,7 +252,7 @@ schemaToEnumDecl instToStripeParam objNm nm s
                       True -> (objNm <> "_" <> t)
                       _ -> t
                   withPrefixCon conName =
-                    case conName `elem` [ "active", "inactive", "pending", "match", "mismatch", "not_provided", "stolen", "lost", "manual", "automatic" ] of
+                    case conName `elem` [ "active", "always", "auto", "automatic", "credit_reversal", "debit_reversal", "if_required", "inactive", "inbound_transfer", "pending", "match", "mismatch", "not_provided", "outbound_payment", "outbound_transfer", "received_credit", "received_debit", "restricted", "stolen", "unrestricted", "lost", "manual", "none", "other" ] of
                       True -> (nm <> "_" <> conName)
                       _ -> conName
                   occNam = textToPascalName $ withPrefixType nm
@@ -273,16 +273,10 @@ schemaToEnumDecl instToStripeParam objNm nm s
                     case instToStripeParam of
                       HelperToStripeParam path ->
                         let funName = T.concat (path ++ [nm])
-{-
-                            matches = [ match [ bvar (textToPascalName $ withPrefixCon c) ] (list (tuple [ string $ T.unpack $ mkKey (path ++ [nm])
-                                                                                                         , string $ T.unpack (withPrefixCon c)
-                                                                                                         ])) | (Aeson.String c) <- vs ]
--}
                             matches = [ match [ bvar (textToPascalName $ withPrefixCon c) ] (list [ tuple [ string $ T.unpack $ mkKey (path ++ [nm])
                                                                                                           , string $ T.unpack (withPrefixCon c)
                                                                                                           ] ])
                                       | (Aeson.String c) <- vs ]
- 
                         in [( funName
                             , funBind (fromString $ T.unpack funName)
 --                               (match [conP (fromString (textToPascalName $ tyName)) [ bvar "n" ]] (var "id")))
@@ -626,7 +620,8 @@ mkKey (p:ps) =
     mkSquare [] = ""
     mkSquare (k:ks) = "[" <> k <> "]" <> mkSquare ks
 
-schemaToTypeDecls :: GenStyle -> Bool -> MkToStripeParam -> Text -> Text -> Schema -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [(Text, RawValBind)])
+schemaToTypeDecls :: GenStyle -> Bool -> MkToStripeParam -> Text -> Text -> Schema
+                  -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [(Text, RawValBind)])
 schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
   -- types which are manually defined in Types
   | tyName `elem` [ "expand", "metadata" ] = ([], [], [])
@@ -838,17 +833,25 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                            SkipToStripeParam -> []
                            TopToStripeParam ->
                                [ instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
-                                  [ {- funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "b" ] ]
+                                  [ funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "xs" ] ]
+                                                               (par (op (par ((var "map" @@ (lambda [ bvar "v" ] (tuple [ string (T.unpack $ tyName <> "[]"), (var "encodeUtf8" @@ var "v") ])) @@ (var "xs")))) "++" (var "")))
+                                                             {-
                                                                ( var ":" @@ (tuple [string $ T.unpack tyName, (if' (var "b") (string "true") (string "false"))
                                                                       ]) )
-                                                             ] -} ]
+-}
+                                                             ]
+                                  ]
                                ]
                            _ -> []
 
           in ([], (newtype' occName [] con (derivingCommon' gs)) : inst, []) -- : concat decls
 
         Just (OpenApiItemsObject (Inline s)) ->
-          ([],[],[])
+          trace (T.unpack $ "We should probably actually do something here. inline - " <> tyName {- <> (show (ppSchema s)) -}) $
+          let occName = fromString (textToPascalName tyName)
+              (imports, decls, toStripeParamBuilder) = schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
+          in (imports, decls, toStripeParamBuilder)
+--          in ([],[data' occName [] [ prefixCon (textToPascalName tyName) []] derivingCommon], [])
           {-
           let -- decls' = schemaToTypeDecls "FixMe4a" "FixMe4b" s
               entryTy = case _schemaTitle s of
@@ -869,7 +872,7 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
               con = recordCon occName [(fromString $ "un" <> textToPascalName tyName, field $ listTy $ var $ textToPascalName entryTy)]
           in (concat entryImports , entryDecl : (data' occName [] [con] (derivingCommon' gs)) : concat entryDecls) -- : concat decls
  -}
-        _ -> trace "We should probably actually do something here. 1." $
+        _ -> trace (T.unpack $ "We should probably actually do something here. 1.     - " <> tyName {- <> (show (ppSchema s)) -}) $
                  ([], [], [])
 
     -- the assumption here is that we are generating a record for an object?
@@ -1308,7 +1311,8 @@ mkPathModule modBaseName pathImports decls exports =
                    ] ++ (map mkImport ({- propImports ++ -} pathImports))
          exports = Nothing
          modul  = module' (Just $ fromString $ "Web.Stripe." <> foldr1 (\a b -> a <> "." <> b) modBaseName) exports imports decls
-         extensions = [ FlexibleInstances
+         extensions = [ DeriveDataTypeable
+                      , FlexibleInstances
                       , MultiParamTypeClasses
                       , OverloadedStrings
                       , TypeFamilies
@@ -1332,7 +1336,7 @@ mkPaths oa paths modBaseName =
            concatMap findPropertiesInPathItems (lookupPaths (_openApiPaths oa) paths)
 --         (propImports', propDecls') = unzip $ map (uncurry (schemaToTypeDecls AllDeclarations "FixMeMkPaths")) ([ (t, s) | (t, Inline s) <- requestBodyProperties ])
 --         (propImports, propDecls) = (nub $ concat propImports', concat propDecls')
-         exports = Just (nub $ {- reexportTypes ++ -} (map var (additionalExports)))
+         exports = Nothing -- Just (nub $ {- reexportTypes ++ -} (map var (additionalExports)))
          imports = [ import' "Data.Data" `exposing` [ var "Data" ]
                    , import' "Data.Text" `exposing` [ var "Text" ]
                    , import' "Data.Text.Encoding" `exposing` [ var "encodeUtf8" ]
@@ -1351,7 +1355,8 @@ mkPaths oa paths modBaseName =
                                                           ]
                    ] ++ (map mkImport ({- propImports ++ -} pathImports))
          modul  = module' (Just $ fromString $ "Web.Stripe." <> foldr1 (\a b -> a <> "." <> b) modBaseName) exports imports (opDecls {- ++ propDecls -})
-         extensions = [ FlexibleInstances
+         extensions = [ DeriveDataTypeable
+                      , FlexibleInstances
                       , MultiParamTypeClasses
                       , OverloadedStrings
                       , TypeFamilies
@@ -1494,7 +1499,7 @@ mkId gs baseName =
          )
       ) : if gs == AllDeclarations
              then [ instance' (var "FromJSON" @@ (var $ fromString $ T.unpack n))
-                    [ funBinds "parseJSON" [ match [ bvar "(String x)" ] $
+                    [ funBinds "parseJSON" [ match [ bvar "(Aeson.String x)" ] $
                                              op' (var "pure") "$" ((var $ fromString $ T.unpack n) @@ var "x")
                                            , match [ wildP ] (var "mzero")
                                            ]
@@ -1502,7 +1507,7 @@ mkId gs baseName =
                   , typeInstance' ("ExpandsTo "<> T.unpack (textToPascalName (baseName <> "_id")))  hsOuterImplicit [] Prefix (var $ fromString $ T.unpack $ textToPascalName baseName)
                   , instance' (var "ToStripeParam" @@ (var $ fromString $ T.unpack n))
                       [ funBinds "toStripeParam" [ match [ conP (fromString $ T.unpack n) [ bvar "t" ] ]
-                                                               ( var ":" @@ (tuple [string $ T.unpack n
+                                                               ( var ":" @@ (tuple [string $ T.unpack baseName
                                                                                    , var "encodeUtf8" @@ var "t"
                                                                                    ]) )
                                                              ] ]
@@ -1566,6 +1571,8 @@ breakCycle _        "Quote" = True
 breakCycle _        "BalanceTransaction" = True
 breakCycle _        "Invoice" = True
 breakCycle _        "IssuingTransaction" = True
+breakCycle _        "TreasuryTransaction" = True
+breakCycle _        "CustomerBalanceTransaction" = True
 
 
 {-
@@ -1589,6 +1596,7 @@ mkComponent component@(name, schema) =
          extensions = [ DataKinds
                       , DeriveDataTypeable
                       , FlexibleContexts
+                      , FlexibleInstances
                       , OverlappingInstances
                       , OverloadedStrings
                       , RecordWildCards
@@ -1606,6 +1614,7 @@ mkComponent component@(name, schema) =
                                              , var "(.:?)"
                                              ]
            , import' "Data.Aeson.Types" `exposing` [ var "typeMismatch" ]
+           , qualified' $ import' "Data.Aeson" `as'` "Aeson"
            , import' "Data.Data"  `exposing` [ var "Data", var "Typeable" ]
            , qualified' $ import' "Data.HashMap.Strict" `as'` "H"
            , import' "Data.Map"   `exposing` [ var "Map" ]
@@ -1644,10 +1653,11 @@ mkComponent component@(name, schema) =
 
 mkHsBoot :: (Text, Schema) -> IO ()
 mkHsBoot component@(name, schema)
-  | name `elem` ["charge", "file_link", "external_account", "payment_method", "tax_id", "discount", "payment_source", "invoice_setting_customer_setting", "subscription", "transfer", "api_errors", "setup_attempt", "payment_intent", "transfer_reversal", "account", "application_fee", "quote", "balance_transaction", "invoice", "issuing.transaction", "product"] =
+  | name `elem` ["charge", "file_link", "external_account", "payment_method", "tax_id", "discount", "payment_source", "invoice_setting_customer_setting", "subscription", "transfer", "api_errors", "setup_attempt", "payment_intent", "transfer_reversal", "account", "application_fee", "quote", "balance_transaction", "invoice", "issuing.transaction", "product", "treasury.transaction", "customer_balance_transaction"] =
   do let extensions = [ DataKinds
                       , DeriveDataTypeable
                       , FlexibleContexts
+                      , FlexibleInstances
                       , OverlappingInstances
                       , OverloadedStrings
                       , RecordWildCards
@@ -1704,6 +1714,7 @@ mkTypes oa =
   do let extensions = [ DataKinds
                       , DeriveDataTypeable
                       , FlexibleContexts
+                      , FlexibleInstances
                       , OverlappingInstances
                       , OverloadedStrings
                       , RecordWildCards
@@ -2061,9 +2072,12 @@ main =
 --     let e = findEnums oa
 --     print $ Map.keys e
      createDirectoryIfMissing True "_generated/src/Web/Stripe"
-     copyFile "static/Web/Stripe/StripeRequest.hs" "_generated/src/Web/Stripe/StripeRequest.hs"
-     copyFile "static/Web/Stripe/OneOf.hs"         "_generated/src/Web/Stripe/OneOf.hs"
-     copyFile "static/Web/Stripe/Util.hs"          "_generated/src/Web/Stripe/Util.hs"
+     copyFile "static/src/Web/Stripe/Client.hs"        "_generated/src/Web/Stripe/Client.hs"
+     copyFile "static/src/Web/Stripe/Error.hs"         "_generated/src/Web/Stripe/Error.hs"
+     copyFile "static/src/Web/Stripe/StripeRequest.hs" "_generated/src/Web/Stripe/StripeRequest.hs"
+     copyFile "static/src/Web/Stripe/OneOf.hs"         "_generated/src/Web/Stripe/OneOf.hs"
+     copyFile "static/src/Web/Stripe/Util.hs"          "_generated/src/Web/Stripe/Util.hs"
+     copyFile "static/stripe-core.cabal"               "_generated/stripe-core.cabal"
 
      mkTypes oa
      mkComponents oa
