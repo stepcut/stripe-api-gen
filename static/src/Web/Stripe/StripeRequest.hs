@@ -123,9 +123,11 @@ instance ToStripeParam ChargeId where
   toStripeParam (ChargeId cid) =
     (("charge", Text.encodeUtf8 cid) :)
 -}
+{-
 instance ToStripeParam Created where
   toStripeParam (Created time) =
     (("created", toBytestring $ toSeconds time) :)
+-}
 {-
 instance ToStripeParam ApplicationFeeId where
   toStripeParam (ApplicationFeeId aid) =

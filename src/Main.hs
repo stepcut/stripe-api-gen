@@ -6,6 +6,7 @@
 {-# language DataKinds #-}
 {-# language FlexibleInstances #-}
 {-# language ViewPatterns #-}
+{-# language MultiWayIf #-}
 module Main where
 
 -- import Control.Monad.State (State(..), evalState)
@@ -24,7 +25,7 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.HashMap.Strict.InsOrd as InsOrd
 import Data.HashMap.Strict.InsOrd (InsOrdHashMap)
-import Data.Maybe (fromJust, isJust, isNothing, fromMaybe)
+import Data.Maybe (catMaybes, fromJust, isJust, isNothing, fromMaybe)
 import Data.OpenApi hiding (trace)
 import Data.String (IsString(fromString))
 import Data.List (nub, nubBy, sortOn, sort)
@@ -335,6 +336,28 @@ It is not clear if you can mix properties and additionalProperties.
 
 -}
 
+-- | list type things with data, has_more, url
+isList :: Schema -> Bool
+isList s =
+  let props = _schemaProperties s
+  in and [ InsOrd.member "data" props
+         , InsOrd.member "has_more" props
+         , InsOrd.member "object" props
+         , InsOrd.member "url" props
+         ]
+
+isRangeQuerySpec :: Schema -> Bool
+isRangeQuerySpec s =
+  case _schemaTitle s of
+    (Just t) | t == "range_query_specs" -> True
+    _ -> False
+
+isAnyOfRangeQuerySpec :: Schema -> Bool
+isAnyOfRangeQuerySpec s =
+  case _schemaAnyOf s of
+    (Just [(Inline schema1), (Inline schema2)]) -> isRangeQuerySpec schema1 && (_schemaType schema2 == Just OpenApiInteger)
+    _ -> False
+
 schemaToType' :: GenStyle
               -> Text
               -> Text
@@ -390,9 +413,9 @@ schemaToType' gs p n s
         Just (OpenApiItemsObject (Ref (Reference r))) ->
           ([(textToPascalName r, [textToPascalName r])], var "StripeList" @@ (var $ textToPascalName r), [])
         Just (OpenApiItemsObject (Inline s)) ->
-              let name = case _schemaTitle s of
+              let name = {- case _schemaTitle s of
                     (Just t) -> t
-                    Nothing  -> n
+                    Nothing  -> -} n
                   (imports, ty, decls) = schemaToType' gs "FixMe4a" name s
               in (imports, var "StripeList" @@ ty, decls)
         Nothing -> ([], var "FixMeOpenApiItemsObject", [])
@@ -402,9 +425,9 @@ schemaToType' gs p n s
           let (imports, ty, decls) = referencedSchemaToType gs p n rSchema
           in (imports, var (fromString "Map") @@ var (fromString "Text") @@ ty, decls)
         _ ->
-          case n of
+          case isList s of
             -- handle things which can be expressed via the 'Lines a' type
-            "lines" ->
+            True ->
               case InsOrd.lookup "data" (_schemaProperties s) of
                 (Just (Inline dataSchema)) ->
                   case _schemaItems dataSchema of
@@ -414,9 +437,20 @@ schemaToType' gs p n s
                     Nothing -> error "Expected 'lines.data' to have an 'items' property"
                 Nothing -> error "Expected 'lines' to have a data property"
 
-            _ ->
+            False ->
               let (imports, decls, toStripeParamBuilder) = schemaToTypeDecls gs False SkipToStripeParam p n s
-              in (imports, var (fromString $ textToPascalName n), decls)
+                  nm = {-
+                    case InsOrd.lookup "resourceId" (_unDefs $ _schemaExtensions s) of
+                      (Just (Aeson.String t)) -> t
+                      Nothing ->
+                        case _schemaTitle s of
+                          (Just t) -> t
+                          Nothing  -> -} n
+{- case _schemaTitle s of
+                    (Just t) -> t
+                    Nothing  ->  n -}
+              in (imports, var (fromString $ textToPascalName nm), decls)
+    -- FIXME: for things that are parameters, instead of OneOf couldn't we just use multiple StripeHasParam instances
   | isJust (_schemaAnyOf s) =
       case _schemaAnyOf s of
         (Just [(Inline schema1), (Ref (Reference r))])
@@ -620,12 +654,26 @@ mkKey (p:ps) =
     mkSquare [] = ""
     mkSquare (k:ks) = "[" <> k <> "]" <> mkSquare ks
 
+
+referencedSchemaToTypeDecls :: GenStyle -> Bool -> MkToStripeParam -> Text -> Text -> Referenced Schema -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [(Text, RawValBind)])
+referencedSchemaToTypeDecls gs wrapPrim instToStripeParam objName tyName (Inline s) = schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
+referencedSchemaToTypeDecls gs wrapPrim instToStripeParam objName tyName  (Ref (Reference r)) =
+  trace ("referencedSchemaToTypeDecls - should we do something here? " ++ show r) ([],[],[])
+  {-
+  let imports
+        | (objName == r) = []
+        | otherwise = [(textToPascalName r, [textToPascalName r]) ]
+  in (imports, (var $ textToPascalName r), [])
+-}
+
 schemaToTypeDecls :: GenStyle -> Bool -> MkToStripeParam -> Text -> Text -> Schema
                   -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [(Text, RawValBind)])
 schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
   -- types which are manually defined in Types
-  | tyName `elem` [ "expand", "metadata" ] = ([], [], [])
-  | tyName `elem` ["lines", "line_items", "use_stripe_sdk", "refunds", "customer_id", {- "automatic_tax", -} "currency"] = ([], [], [])
+  | tyName `elem` [ {- "Created", "Limit" , "EndingBefore", "StartingAfter" -} ] = ([], [], [])
+  | tyName `elem` [ "expand", "metadata"] = ([], [], [])
+  | tyName `elem` ["lines", "line_items", "use_stripe_sdk", {- "refunds",-} "customer_id", {- "automatic_tax", -} "currency"] = ([], [], [])
+  | isList s = ([], [], [])
   {-
   | tyName == "default_tax_rates" =
       -- FIXME: The docs says  'Pass an empty string to remove previously-defined tax rates'. Does passing an empty list do that?
@@ -707,7 +755,14 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                   ([],[],[])
                 (Just schemas) ->
 --                  mkSumType tyName schemas --
-                  let (imports, types, decls) = unzip3 $ map (referencedSchemaToType gs objName "FixMe6") schemas
+                  let mkName :: Referenced Schema -> Text
+                      mkName (Ref _)  = "FixMe6"
+                      mkName (Inline s) =
+                        case _schemaTitle s of
+                          Nothing  -> "FixMe6"
+                          (Just t) -> t
+                      (imports, types, decls) = unzip3 $ map (\s -> referencedSchemaToType gs objName (mkName s) s) schemas
+                      (imports', decls', toStripeParamBuilder') = unzip3 $ map (referencedSchemaToTypeDecls gs wrapPrim instToStripeParam "FixMe6" tyName) schemas
                       occName   = fromString (textToPascalName tyName)
                       conName   = fromString (textToPascalName tyName)
                       unConName = fromString ("un" <> textToPascalName tyName)
@@ -724,7 +779,7 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                         then  data' occName [] cons derivingCommon : mkFromJSON tyName s : instances
                               -- the are things that are anyOf things which are ids. We should probably detect this pattern, but it is rare enough that this list works for now.
                         else  data' occName [] [] [] : [ instance' (var n @@ var (textToPascalName tyName)) [] | n <- derivingNames ] ++  instances
-                  in (concat imports, dataDecls, [])
+                  in (concat (imports ++ imports'), dataDecls ++ (concat decls), concat toStripeParamBuilder')
 
 {-
             Nothing ->
@@ -877,7 +932,13 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
 
     -- the assumption here is that we are generating a record for an object?
   | otherwise =
-      let name = tyName
+      let name = {-
+            case InsOrd.lookup "resourceId" (_unDefs $ _schemaExtensions s) of
+              (Just (Aeson.String t)) -> t
+              Nothing ->
+                 case _schemaTitle s of
+                  (Just t) -> t
+                  Nothing  -> -} tyName
           occName = fromString (textToPascalName name)
 --          (fields, decls) =  unzip $ map (schemaToField (fromMaybe "FixMe2b" (_schemaTitle s))) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
 
@@ -983,9 +1044,18 @@ mkToStripeParam paramNm =
   instance' (var "ToStripeParam" @@  (var paramNm))
     [ funBinds "toStripeParam" [ match [ conP (mkParamName Pascal $ _paramName param) [ bvar "v" ] ] (var "id") ]
   -}
-mkStripeHasParam :: OccNameStr -> Maybe Text -> Referenced Param -> (RdrNameStr, [HsDecl'])
+mkStripeHasParam :: OccNameStr
+                 -> Maybe Text
+                 -> Referenced Param
+--                 -> (RdrNameStr, [HsDecl'])
+                 -> (Maybe ParamName, (Maybe (NonEmpty String), [(RdrNameStr, [RdrNameStr])], [HsDecl'], InsOrdHashMap Text [HsDecl']))
 mkStripeHasParam opName mIdName (Inline param) =
-  let paramNm = mkParamName Pascal $ _paramName param
+  let paramNm = {- mkParamName Pascal $ -} _paramName param
+      req = case _paramRequired param of
+              (Just True) -> Just (_paramName param)
+              _           -> Nothing
+  in (req, mkStripeHasParamFromProperty (NonEmpty.singleton "modBaseName") opName (paramNm, (fromJust (_paramSchema param))))
+{-
   in if paramNm `elem` ["StartingAfter", "EndingBefore"]
      then case mIdName of
             Nothing -> error $ "mkStripeHasParam: expect an idName but got Nothing. opName = " ++ show opName ++ " , param = " ++ show (ppParam param)
@@ -994,7 +1064,7 @@ mkStripeHasParam opName mIdName (Inline param) =
                        [ funBinds "toStripeParam" [ match [ conP (mkParamName Pascal $ _paramName param) [ bvar "v" ] ] (var "id") ] ]
                     , instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var $ paramNm)) []
                     ])
-
+-}
 needsOwnModule :: Schema -> Bool
 needsOwnModule s =
   (not $ InsOrd.null (_schemaProperties s)) ||
@@ -1010,22 +1080,30 @@ mkStripeHasParamFromProperty :: NonEmpty String -- ^ module name -- just the las
                              -> (Text, (Referenced Schema))
                              -> (Maybe (NonEmpty String), [(RdrNameStr, [RdrNameStr])], [HsDecl'], InsOrdHashMap Text [HsDecl'])
 mkStripeHasParamFromProperty modBaseName opName (pName, r@(Inline schema)) =
-  let pn = mkParamName Pascal pName
-      insts = (instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var pn)) []) :
-              (if pn `elem` [ "Metadata" ] then [] else [{- mkToStripeParam pName schema -}])
-{-                 [ instance' (var "ToStripeParam" @@ (var pn))
-                   [ {- funBinds "toStripeParam" [ match [ conP (mkParamName Pascal pName) [ bvar "v" ] ]
-(var "id")
-                                                                                     ] -}
-                                                          ]]) -}
+      if | isAnyOfRangeQuerySpec schema ->
+             let pn = mkParamName Pascal pName
+                 decls = [ data' (mkParamName Pascal pName) [] [ prefixCon (mkParamName Pascal pName) [ strict $ field $ var "UTCTime" ] ] derivingCommon ]
+                 insts = [ instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var pn)) []
+                         , instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var "TimeRange" @@ (var pn))) []
+                         , instance' (var "ToStripeParam" @@ (var pn ))
+                           [ funBinds "toStripeParam" [ match [ conP pn [ bvar "t" ] ]
+                                                               ( var ":" @@ (tuple [string $ T.unpack pName
+                                                                                   , var "encodeUtf8" @@ var "t"
+                                                                                   ]) )
+                                                             ] ]
+                         ]
+             in (Nothing , {- FIXME: this does not work because the module path is prepended. [(fromString "Web.Stripe.Types", [fromString "TimeRange"]) ] -} [], decls ++ insts, InsOrd.empty)
 
---      (_, insts) = mkStripeHasParam opName Nothing r
-      (imports, decls, toStripeParamBuilder) = schemaToTypeDecls AllDeclarations True TopToStripeParam "FixMeHasParamFromProperty1" pName schema
-      tys = InsOrd.fromList [(pName, decls)]
-      ownMod
-        | needsOwnModule schema = Just $ modBaseName <> (NonEmpty.singleton $ textToPascalName pName)
-        | otherwise = Nothing
-  in (ownMod , imports, insts, tys)
+         | otherwise ->
+             let pn = mkParamName Pascal pName
+                 insts = (instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var pn)) []) :
+                      (if pn `elem` [ "Metadata" ] then [] else [{- mkToStripeParam pName schema -}])
+                 (imports, decls, toStripeParamBuilder) = schemaToTypeDecls AllDeclarations True TopToStripeParam "FixMeHasParamFromProperty1" pName schema
+                 tys = InsOrd.fromList [(pName, decls)]
+                 ownMod
+                      | needsOwnModule schema = Just $ modBaseName <> (NonEmpty.singleton $ textToPascalName pName)
+                      | otherwise = Nothing
+             in (ownMod , imports, insts, tys)
 
 mkStripeRequestBodyStripeHasParam :: NonEmpty String -- ^ module name -- just the last bit like 'Account'
                                   -> OccNameStr
@@ -1166,6 +1244,13 @@ mkOperationTypes (modBaseName, decls) =
 --      reexports =  map (mkParamName Pascal . fst) $ concatMap InsOrd.toList typeDecls
   in (modBaseName, paramImports, instanceDecls, typeDecls')
 -}
+
+{-
+For GET requests, the params come from _operationParameters.
+For POST requests the params come from _operationRequestBody.
+
+Not sure if POST requests also have operationParameters
+-}
 mkOperation :: NonEmpty String -- ^ module name -- just the last bit like 'Account'
             -> FilePath        -- ^ path
             -> Method          -- ^ method
@@ -1179,6 +1264,7 @@ mkOperation modBaseName path method mIdName op =
       -- create a constructorless type for use as the phantom type parameter to StripeRequest
       opIdDecl = data' opName [] [] []
 
+      -- create all the  StripeHasParam instances for params that appear in the RequestBody of this operation
       (requiredParams, decls) = mkStripeRequestBodyStripeHasParam modBaseName opName (_operationRequestBody op)
       (thisModDecls, ownModDecls) = partition (\(m,_,_,_) -> isNothing m) decls
       (_, paramImports, instanceDecls, typeDecls) = unzip4 thisModDecls
@@ -1191,15 +1277,22 @@ mkOperation modBaseName path method mIdName op =
       inQuery :: Referenced Param -> Bool
       inQuery (Inline p) = (_paramIn p) == ParamQuery
 
-      -- create all the  StripeHasParam instances for this operation
-      (params, stripeHasParamDecls') = unzip $ map (mkStripeHasParam opName mIdName) $ filter inQuery (_operationParameters op)
-      stripeHasParamDecls =  (concat stripeHasParamDecls') ++ (concat instanceDecls) ++ typeDecls'
+      -- create all the  StripeHasParam instances for params that appear in the Query of this operation
+      (requiredParamsOP, declsOP) = unzip $ map (mkStripeHasParam opName mIdName) $ filter inQuery (_operationParameters op)
+      (thisModDeclsOP, ownModDeclsOP) = partition (\(m,_,_,_) -> isNothing m) declsOP
+      (_, paramImportsOP, instanceDeclsOP, typeDeclsOP) = unzip4 thisModDeclsOP
+
+      typeDeclsOP' :: [HsDecl']
+      typeDeclsOP' = concatMap snd $ concatMap InsOrd.toList typeDeclsOP
+
+
+      stripeHasParamDecls = (concat instanceDecls) ++ typeDecls' ++ (concat instanceDeclsOP) ++ typeDeclsOP'
 
       (returnImports, returnTy) =
             case InsOrd.lookup 200 (_responsesResponses (_operationResponses op)) of
               (Just (Inline resp)) -> responseType resp
 
-      (requestDeclImports, requestDecl, requestTypes) = mkRequestDecl path method mIdName op requiredParams
+      (requestDeclImports, requestDecl, requestTypes) = mkRequestDecl path method mIdName op (requiredParams ++ (catMaybes requiredParamsOP))
 
       stripeReturnDecl = tyFamInst "StripeReturn" [var $ UnqualStr opName] returnTy
 
@@ -1210,7 +1303,8 @@ mkOperation modBaseName path method mIdName op =
         case mIdName of
           Nothing -> id
           (Just idName) -> (textToPascalName idName :)
-  in (Nothing, (requestDeclImports ++ returnImports ++ concat paramImports, (requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls)), [] )) :
+          -- FIXME: this nub should really combine and nub all imports from the same module into a single import
+  in (Nothing, (requestDeclImports ++ returnImports ++ concat paramImports ++ nub (concat paramImportsOP), (requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls)), [] )) :
      (map (\(mModBase, pathImports, instanceDecls, typeDecls) -> (mModBase, (pathImports, (concatMap snd $ InsOrd.toList typeDecls) ++ instanceDecls, []))) ownModDecls)
                                                                             -- (fromJust mModBase, pathImports, instanceDecls, concatMap snd $ concatMap InsOrd.toList typeDecls))) ownModDecls)
 
@@ -1286,7 +1380,9 @@ mkOwnMods (Just modBaseName, decls) =
 
 mkPathModule modBaseName pathImports decls exports =
   do let imports = [ import' "Data.Data" `exposing` [ var "Data" ]
+                   , import' "Data.Time.Clock" `exposing` [ var "UTCTime" ]
                    , import' "Data.Text" `exposing` [ var "Text" ]
+                   , import' "Data.Text.Encoding" `exposing` [ var "encodeUtf8" ]
                    , import' "Web.Stripe.StripeRequest" `exposing`
                        [ thingAll "Method"
                        , thingWith "StripeHasParam" []
@@ -1297,21 +1393,29 @@ mkPathModule modBaseName pathImports decls exports =
                        ]
                    , import' "Web.Stripe.Types" `exposing`
                         [ thingWith "Currency" []
+--                        , thingAll "Created"
+                        , thingAll "TimeRange"
                         , thingAll "Emptyable"
                         , thingAll "ExpandParams"
                         , thingAll "Metadata"
                         , thingAll "StripeList"
-                        , thingAll "StartingAfter"
-                        , thingAll "EndingBefore"
-                        , thingAll "Limit"
+--                        , thingAll "StartingAfter"
+--                        , thingAll "EndingBefore"
+--                        , thingAll "Limit"
                         , thingAll "NowOrLater"
                         ]
+                   , import' "Web.Stripe.OneOf" `exposing`
+                      [ thingAll "OneOf"
+                      ]
                    , import' "Web.Stripe.Util" `exposing` [ var "(</>)"
+                                                          , var "toBytestring"
+                                                          , var "toSeconds"
                                                           ]
                    ] ++ (map mkImport ({- propImports ++ -} pathImports))
          exports = Nothing
          modul  = module' (Just $ fromString $ "Web.Stripe." <> foldr1 (\a b -> a <> "." <> b) modBaseName) exports imports decls
-         extensions = [ DeriveDataTypeable
+         extensions = [ DataKinds
+                      , DeriveDataTypeable
                       , FlexibleInstances
                       , MultiParamTypeClasses
                       , OverloadedStrings
@@ -1332,14 +1436,27 @@ mkPaths oa paths modBaseName =
   do let (thisMod, ownMods') = partition (isNothing . fst) $ concatMap (mkPath oa modBaseName) paths
          ownsMods' = Map.toList $ Map.fromListWith (<>) ownMods'
          (pathImports, opDecls, {- reexportTypes, -} additionalExports) = unzip3Concat $ map snd thisMod
-         requestBodyProperties =
-           concatMap findPropertiesInPathItems (lookupPaths (_openApiPaths oa) paths)
+--         requestBodyProperties =
+--           concatMap findPropertiesInPathItems (lookupPaths (_openApiPaths oa) paths)
 --         (propImports', propDecls') = unzip $ map (uncurry (schemaToTypeDecls AllDeclarations "FixMeMkPaths")) ([ (t, s) | (t, Inline s) <- requestBodyProperties ])
 --         (propImports, propDecls) = (nub $ concat propImports', concat propDecls')
+     mkPathModule modBaseName pathImports opDecls Nothing
+{-
          exports = Nothing -- Just (nub $ {- reexportTypes ++ -} (map var (additionalExports)))
-         imports = [ import' "Data.Data" `exposing` [ var "Data" ]
+         imports = [ import' "Data.Aeson" `exposing` [ thingWith "FromJSON" [ "parseJSON" ]
+                                             , thingAll "ToJSON"
+                                             , thingWith "Value" [ "String", "Object", "Bool" ]
+                                             , var "(.:)"
+                                             , var "(.:?)"
+                                             ]
+                   , import' "Data.Aeson.Types" `exposing` [ var "typeMismatch" ]
+                   , qualified' $ import' "Data.Aeson" `as'` "Aeson"
+                   , import' "Data.Data" `exposing` [ var "Data" ]
                    , import' "Data.Text" `exposing` [ var "Text" ]
                    , import' "Data.Text.Encoding" `exposing` [ var "encodeUtf8" ]
+                   , import' "Web.Stripe.OneOf" `exposing`
+                      [ thingAll "OneOf"
+                      ]
                    , import' "Web.Stripe.StripeRequest" `exposing`
                      [ thingAll "Method"
                      , thingWith "StripeHasParam" []
@@ -1348,14 +1465,26 @@ mkPaths oa paths modBaseName =
                      , var "StripeReturn"
                      , var "mkStripeRequest"
                      ]
-                   , import' "Web.Stripe.Types" `exposing` (thingWith "Currency" [] : thingAll "Emptyable" : thingAll "ExpandParams" : thingAll "Metadata" : thingAll "StripeList" : thingAll "StartingAfter": thingAll "EndingBefore" : thingAll "Limit" : thingAll "NowOrLater" : [] {- (nub reexportTypes) -} )
+                   , import' "Web.Stripe.Types" `exposing`
+                      [ thingWith "Currency" []
+                        -- , thingWith "Created" []
+                      , thingAll "Emptyable"
+                      , thingAll "ExpandParams"
+                      , thingAll "Metadata"
+                      , thingAll "StripeList"
+                      , thingAll "StartingAfter"
+                      , thingAll "EndingBefore"
+                      , thingAll "Limit"
+                      , thingAll "NowOrLater"
+                      ]
                    , import' "Web.Stripe.Util" `exposing` [ var "(</>)"
                                                           , var "toBytestring"
                                                           , var "toSeconds"
                                                           ]
                    ] ++ (map mkImport ({- propImports ++ -} pathImports))
          modul  = module' (Just $ fromString $ "Web.Stripe." <> foldr1 (\a b -> a <> "." <> b) modBaseName) exports imports (opDecls {- ++ propDecls -})
-         extensions = [ DeriveDataTypeable
+         extensions = [ DataKinds
+                      , DeriveDataTypeable
                       , FlexibleInstances
                       , MultiParamTypeClasses
                       , OverloadedStrings
@@ -1366,7 +1495,7 @@ mkPaths oa paths modBaseName =
      let filepath = "_generated/src/Web/Stripe/" <> foldr1 (\a b -> a <> "/" <> b) modBaseName <> ".hs"
      createDirectoryIfMissing True (takeDirectory filepath)
      T.writeFile filepath formatted
-
+-}
      mapM_ mkOwnMods ownMods'
      pure ()
   {-
@@ -1390,8 +1519,8 @@ mkPath :: OpenApi
        -> (FilePath, Maybe Text)
        -> [(Maybe (NonEmpty String), ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [RdrNameStr]))]
 mkPath oa modBasePath (path, idName) =
---  mkPath' oa GET  (path, idName) <>
-  mkPath' oa modBasePath POST (path, idName)
+  mkPath' oa modBasePath GET  (path, idName) -- <>
+--  mkPath' oa modBasePath POST (path, idName)
 {-
 mkPath oa (path, idName) =
   let (Just pi) = InsOrd.lookup path (_openApiPaths oa)
@@ -1421,7 +1550,7 @@ mkPath' oa modBasePath method (path, idName) =
                     GET  -> _pathItemGet pi
                     POST -> _pathItemPost pi
   in case mop of
-       Nothing -> []
+       Nothing   -> []
        (Just op) -> mkOperation modBasePath path method idName op
 {-
         Nothing -> ([],[],[])
@@ -1634,8 +1763,9 @@ mkComponent component@(name, schema) =
            ]
          exports = Nothing
          (objectImports', objectDecls, toStripeParamBuilder) = mkObject AllDeclarations component
-         objectImports = map (\(n, things) -> sourceImport pname n $ import' (fromString $ "Web.Stripe.Component."  <> (rdrNameStrToString n))
-                                    `exposing` [ thingWith thing [] | thing <- things ] )  objectImports'
+         objectImports = map (\(n, things) -> sourceImport pname n $
+                               import' (fromString $ "Web.Stripe.Component."  <> (rdrNameStrToString n))
+                                    `exposing` [ thingWith thing [] | thing <- things ] ) (filter (\(n, _) -> (n /= (textToPascalName name))) objectImports')
          decls = [ -- ExpandsTo
                  ] ++
                  objectDecls ++
@@ -1758,7 +1888,7 @@ mkTypes oa =
                  , data' "UseStripeSdk" []  [ prefixCon "UseStripeSdk" [] ] derivingCommon
                  , instance' (var "FromJSON" @@ var "UseStripeSdk") [ funBinds "parseJSON" [ match []  (var "undefined")] ]
 --                 , instance' (var "FromJSON" @@ var "StripeType") [ funBinds "parseJSON" [ match []  (var "undefined")] ]
-                 , data' "Refunds" []  [ prefixCon "Refunds" [] ] derivingCommon
+--                 , data' "Refunds" []  [ prefixCon "Refunds" [] ] derivingCommon
                  , data' "Expandable" [ bvar "id" ] [ prefixCon "Id" [ field $ var "id" ]
                                                     , prefixCon "Expanded"  [field $ var "ExpandsTo" @@ var "id"]
                                                     ] [ deriving' [ var "Typeable" ]]
@@ -1913,7 +2043,7 @@ showGhc a =
     do dflags <- getDynFlags
        pure $ showPpr dflags a
 
-timeNewtypes = [ "AvailableOn", "Created", "Date" ]
+timeNewtypes = [ "AvailableOn", {- "Created", -} "Date" ]
 
 findIds :: OpenApi -> [Text]
 findIds oa =
@@ -1926,6 +2056,7 @@ findIds' (obj, s) =
     Nothing -> []
     (Just _) -> [ obj ]
 
+{-
 -- FIMXE: make sure that types with the same name are actually compatible
 findRequestBodyProperties :: OpenApi -> [(Text, Referenced Schema)]
 findRequestBodyProperties oa =
@@ -1956,7 +2087,8 @@ findPropertiesInRequestBody rb =
         (Just (Ref _)) -> []
         (Just (Inline s)) ->
           InsOrd.toList (_schemaProperties s)
-
+-}
+{-
 findParams :: OpenApi -> [Referenced Param]
 findParams oa =
   concatMap findParamsInPathItem (InsOrd.toList $ _openApiPaths oa)
@@ -1971,7 +2103,7 @@ findParamsInPathItem (fp, pi) =
 findParamsInOperation :: Maybe Operation -> [Referenced Param]
 findParamsInOperation Nothing   = []
 findParamsInOperation (Just op) = _operationParameters op
-
+-}
 findEnums :: OpenApi -> Map Text (Set Text)
 findEnums oa =
     foldr findEnums' Map.empty (InsOrd.toList $ _componentsSchemas (_openApiComponents oa))
@@ -2111,6 +2243,11 @@ main =
      mkPaths oa [ ("/v1/subscriptions" , Just "SubscriptionId")
 --                , ("/v1/subscriptions/{subscription_exposed_id}", Just "SubscriptionId")
                 ] (NonEmpty.singleton "Subscriptions")
+
+     -- Web.Stripe.Plans
+     mkPaths oa [ ("/v1/plans" , Just "PlanId")
+--                , ("/v1/subscriptions/{subscription_exposed_id}", Just "SubscriptionId")
+                ] (NonEmpty.singleton "Plans")
 
      -- Web.Stripe.Plans
      {-
