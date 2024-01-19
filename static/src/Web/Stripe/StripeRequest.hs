@@ -421,6 +421,7 @@ instance ToStripeParam TaxPercent where
   toStripeParam (TaxPercent tax) =
     (("tax_percent", fromString $ showFFloat (Just 2) tax "") :)
 -}
+-}
 instance ToStripeParam a => ToStripeParam (TimeRange a) where
   toStripeParam (TimeRange{..}) =
     (case gt of
@@ -443,7 +444,7 @@ instance ToStripeParam a => ToStripeParam (TimeRange a) where
         case f [] of
           [(k,v)] -> ((k <> "[" <> n <> "]", v) :)
           lst'       -> error $ "toRecord in ToStripeRange (TimeRange a) expected exactly one element in this list. " ++ show lst'
-
+{-
 instance ToStripeParam TokenId where
   toStripeParam (TokenId tid) =
     (("card", Text.encodeUtf8 tid) :)

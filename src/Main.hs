@@ -672,7 +672,7 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
   -- types which are manually defined in Types
   | tyName `elem` [ {- "Created", "Limit" , "EndingBefore", "StartingAfter" -} ] = ([], [], [])
   | tyName `elem` [ "expand", "metadata"] = ([], [], [])
-  | tyName `elem` ["lines", "line_items", "use_stripe_sdk", {- "refunds",-} "customer_id", {- "automatic_tax", -} "currency"] = ([], [], [])
+  | tyName `elem` ["lines", "line_items", "use_stripe_sdk", {- "refunds",-} {- "customer_id", -} {- "automatic_tax", -} "currency"] = ([], [], [])
   | isList s = ([], [], [])
   {-
   | tyName == "default_tax_rates" =
@@ -1027,13 +1027,14 @@ mkParamName p =
 data NameStyle = Pascal | Camel deriving (Eq, Ord, Read, Show)
 
 -- FIXME: the list of things which are actually IDs should be computed, not hard coded
-mkParamName :: (IsString s) => NameStyle -> Text -> s
+mkParamName :: (IsString s) => NameStyle -> Text -> ([(RdrNameStr, [RdrNameStr])],  s)
 mkParamName s p =
   case p of
-    "expand" -> fromString "ExpandParams"
+    "expand" -> ([], fromString "ExpandParams")
     -- things which are actually IDs
-    n | n `elem` ["charge", "customer"] -> fromString $ textToName (n <> "_id")
-    n        -> fromString $ textToName n
+    n | n `elem` ["charge", "customer"] ->
+          ([(textToPascalName n, [ textToPascalName (n <> "_id")])], fromString $ textToName (n <> "_id"))
+    n        -> ([], fromString $ textToName n)
 
   where
     textToName
@@ -1069,41 +1070,41 @@ needsOwnModule :: Schema -> Bool
 needsOwnModule s =
   (not $ InsOrd.null (_schemaProperties s)) ||
   (not $ null $ _schemaItems s)
-
+{-
 mkToStripeParam :: Text -> Schema -> HsDecl'
 mkToStripeParam pName schema =
   let pn = mkParamName Pascal pName
   in instance' (var "ToStripeParam" @@ (var pn)) []
-
+-}
 mkStripeHasParamFromProperty :: NonEmpty String -- ^ module name -- just the last bit like 'Account'
                              -> OccNameStr
                              -> (Text, (Referenced Schema))
                              -> (Maybe (NonEmpty String), [(RdrNameStr, [RdrNameStr])], [HsDecl'], InsOrdHashMap Text [HsDecl'])
 mkStripeHasParamFromProperty modBaseName opName (pName, r@(Inline schema)) =
       if | isAnyOfRangeQuerySpec schema ->
-             let pn = mkParamName Pascal pName
-                 decls = [ data' (mkParamName Pascal pName) [] [ prefixCon (mkParamName Pascal pName) [ strict $ field $ var "UTCTime" ] ] derivingCommon ]
+             let (pimports, pn) = mkParamName Pascal pName
+                 decls = [ data' (snd $ mkParamName Pascal pName) [] [ prefixCon (snd $ mkParamName Pascal pName) [ strict $ field $ var "UTCTime" ] ] derivingCommon ]
                  insts = [ instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var pn)) []
                          , instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var "TimeRange" @@ (var pn))) []
                          , instance' (var "ToStripeParam" @@ (var pn ))
                            [ funBinds "toStripeParam" [ match [ conP pn [ bvar "t" ] ]
                                                                ( var ":" @@ (tuple [string $ T.unpack pName
-                                                                                   , var "encodeUtf8" @@ var "t"
+                                                                                   , var "toBytestring" @@ (var "toSeconds" @@ var "t")
                                                                                    ]) )
                                                              ] ]
                          ]
              in (Nothing , {- FIXME: this does not work because the module path is prepended. [(fromString "Web.Stripe.Types", [fromString "TimeRange"]) ] -} [], decls ++ insts, InsOrd.empty)
 
          | otherwise ->
-             let pn = mkParamName Pascal pName
+             let (pimports, pn) = mkParamName Pascal pName
                  insts = (instance' (var "StripeHasParam" @@ (var $ UnqualStr opName) @@ (var pn)) []) :
                       (if pn `elem` [ "Metadata" ] then [] else [{- mkToStripeParam pName schema -}])
-                 (imports, decls, toStripeParamBuilder) = schemaToTypeDecls AllDeclarations True TopToStripeParam "FixMeHasParamFromProperty1" pName schema
+                 (imports, decls, toStripeParamBuilder) = schemaToTypeDecls AllDeclarations True TopToStripeParam "" pName schema
                  tys = InsOrd.fromList [(pName, decls)]
                  ownMod
                       | needsOwnModule schema = Just $ modBaseName <> (NonEmpty.singleton $ textToPascalName pName)
                       | otherwise = Nothing
-             in (ownMod , imports, insts, tys)
+             in (ownMod , pimports ++ imports, insts, tys)
 
 mkStripeRequestBodyStripeHasParam :: NonEmpty String -- ^ module name -- just the last bit like 'Account'
                                   -> OccNameStr
@@ -1201,12 +1202,12 @@ mkRequestDecl path method idName oper requiredParams =
       pathTemplate = extractTemplate (T.pack path)
       (patTys, urlE) = mkUrl idName pathTemplate
 --      (pats, typs) :: ([Pat'], [HsType'])
-      requiredParamTypes   = map (var . mkParamName Pascal) requiredParams
-      requiredParamImports = map (\p -> (fromString ((textToPascalName p)), [ mkParamName Pascal p])) requiredParams
+      requiredParamTypes   = map (var . snd . mkParamName Pascal) requiredParams
+      requiredParamImports = map (\p -> (fromString ((textToPascalName p)), [ snd $ mkParamName Pascal p])) requiredParams
       requiredParamPats :: [Pat']
-      requiredParamPats   = map (bvar . mkParamName Camel) requiredParams
+      requiredParamPats   = map (bvar . snd . mkParamName Camel) requiredParams
       requiredParamVars :: [HsExpr']
-      requiredParamVars   = map (var . mkParamName Camel) requiredParams
+      requiredParamVars   = map (var . snd . mkParamName Camel) requiredParams
       (pats, typs) = unzip patTys
       url = valBind "url" urlE
 
@@ -1272,7 +1273,7 @@ mkOperation modBaseName path method mIdName op =
       typeDecls' :: [HsDecl']
       typeDecls' = concatMap snd $ concatMap InsOrd.toList typeDecls
 
-      reexports =  map (mkParamName Pascal . fst) $ concatMap InsOrd.toList typeDecls
+      reexports =  map (snd . mkParamName Pascal . fst) $ concatMap InsOrd.toList typeDecls
 
       inQuery :: Referenced Param -> Bool
       inQuery (Inline p) = (_paramIn p) == ParamQuery
