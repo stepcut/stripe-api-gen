@@ -172,7 +172,8 @@ replace :: Char -> Char -> String -> String
 replace orig new = map (\c -> if (c == orig) then new  else c)
 
 textToPascalName :: (IsString a) => Text -> a
-textToPascalName = fromString . pascal . (replace '.' '_') . T.unpack
+-- textToPascalName "ID" = fromString "ID" -- FIXME: we want all country codes to be uppercase, but we don't have enough context here
+textToPascalName t = fromString . pascal . (replace '.' '_') . T.unpack $ t
 
 textToCamelName :: (IsString a) => Text -> a
 textToCamelName = fromString . camel . (replace '.' '_') . T.unpack
@@ -221,6 +222,43 @@ schemaToType gs objName n s =
     (Just True) -> (imports, var "Maybe" @@ ty, decls)
     _           -> (imports, ty, decls)
 
+withPrefixEnumCon :: Text -> Text -> Text
+withPrefixEnumCon nm conName
+  | nm `elem` [ "active_features", "allowed_categories", "blocked_categories", "funding_instructions_bank_transfer_financial_address_type", "pending_features", "restricted_features", "supported_networks" ] =
+      nm <> "_" <> conName
+withPrefixEnumCon nm conName
+  | nm `elem` [ "allowed_countries"] =
+      T.toUpper conName
+withPrefixEnumCon nm conName =
+  case conName `elem` [ "active"
+                      , "always"
+                      , "auto"
+                      , "automatic"
+                      , "credit_reversal"
+                      , "debit_reversal"
+                      , "if_required"
+                      , "inactive"
+                      , "inbound_transfer"
+                      , "pending"
+                      , "match"
+                      , "mismatch"
+                      , "not_provided"
+                      , "outbound_payment"
+                      , "outbound_transfer"
+                      , "received_credit"
+                      , "received_debit"
+                      , "restricted"
+                      , "stolen"
+                      , "string"
+                      , "unrestricted"
+                      , "lost"
+                      , "manual"
+                      , "none"
+                      , "other"
+                      ] of
+    True -> (nm <> "_" <> conName)
+    _    -> conName
+
 -- merge this with mkEnums
 schemaToEnumDecl :: MkToStripeParam
                  -> Text    -- ^ objName -- used for disambiguation
@@ -236,7 +274,8 @@ schemaToEnumDecl instToStripeParam objNm nm s
           cons = [ prefixCon (textToPascalName $ "V" <> c) [] | (Aeson.String c) <- vs ]
           occName  = (textToPascalName (objNm <> "_"<> nm))
           occName' = (textToPascalName (objNm <> "_"<> nm))
-      in ((var occName ), [data' occName' [] cons derivingCommon], [])
+          json = mkFromJSON (objNm <> "_"<> nm) s
+      in ((var occName ), [data' occName' [] cons derivingCommon, json], [])
   | _schemaType s == Just OpenApiString =
       case _schemaEnum s of
         (Just vs)
@@ -248,16 +287,12 @@ schemaToEnumDecl instToStripeParam objNm nm s
                 -- https://stripe.com/docs/error-codes) for a list of codes).
                 -- failure_code varies from location to location
 
-                    -- in AccountCapabilities should we just use plain old Status for everything instead of generating unique status types?
+                -- in AccountCapabilities should we just use plain old Status for everything instead of generating unique status types?
                     case (nm `elem` ["status", {- "setup_future_usage", "capture_method", -} "type"]) of
                       True -> (objNm <> "_" <> t)
                       _ -> t
-                  withPrefixCon conName =
-                    case conName `elem` [ "active", "always", "auto", "automatic", "credit_reversal", "debit_reversal", "if_required", "inactive", "inbound_transfer", "pending", "match", "mismatch", "not_provided", "outbound_payment", "outbound_transfer", "received_credit", "received_debit", "restricted", "stolen", "unrestricted", "lost", "manual", "none", "other" ] of
-                      True -> (nm <> "_" <> conName)
-                      _ -> conName
                   occNam = textToPascalName $ withPrefixType nm
-                  matches = [ match [ bvar (textToPascalName $ withPrefixCon c) ] (string $ T.unpack (withPrefixCon c)) | (Aeson.String c) <- vs ]
+                  matches = [ match [ bvar (textToPascalName $ withPrefixEnumCon nm c) ] (string $ T.unpack (withPrefixEnumCon (withPrefixType nm) c)) | (Aeson.String c) <- vs ]
                   inst = case instToStripeParam of
                            SkipToStripeParam -> []
                            TopToStripeParam ->
@@ -274,8 +309,8 @@ schemaToEnumDecl instToStripeParam objNm nm s
                     case instToStripeParam of
                       HelperToStripeParam path ->
                         let funName = T.concat (path ++ [nm])
-                            matches = [ match [ bvar (textToPascalName $ withPrefixCon c) ] (list [ tuple [ string $ T.unpack $ mkKey (path ++ [nm])
-                                                                                                          , string $ T.unpack (withPrefixCon c)
+                            matches = [ match [ bvar (textToPascalName $ withPrefixEnumCon nm c) ] (list [ tuple [ string $ T.unpack $ mkKey (path ++ [nm])
+                                                                                                          , string $ T.unpack (withPrefixEnumCon nm c)
                                                                                                           ] ])
                                       | (Aeson.String c) <- vs ]
                         in [( funName
@@ -287,8 +322,9 @@ schemaToEnumDecl instToStripeParam objNm nm s
                            ]
                       _ -> []
 
-                  cons   = [ prefixCon (textToPascalName $ withPrefixCon c) [] | (Aeson.String c) <- vs ]
-              in (var (fromString occNam), (data' (fromString occNam) [] cons derivingCommon) : inst, toStripeParamBuilder)
+                  cons   = [ prefixCon (textToPascalName $ withPrefixEnumCon (withPrefixType nm) c) [] | (Aeson.String c) <- vs ]
+                  json = mkFromJSON (withPrefixType nm) s
+              in (var (fromString occNam), (data' (fromString occNam) [] cons derivingCommon) : json : inst, toStripeParamBuilder)
         Nothing ->
           let typName = textToPascalName nm
               cons     = [ recordCon (fromString $ textToPascalName nm) [ ((fromString $ "un" <> textToPascalName nm)
@@ -373,7 +409,8 @@ schemaToType' gs p n s
   | n == "version" && isJust (_schemaEnum s) = ([],  var $ textToPascalName (p <> "_version"), [])
 
   | (_schemaType s == Just OpenApiInteger) && (_schemaFormat s == Just "unix-time") =
-      ([], var "UTCTime", [])
+--      ([], var "UTCTime", [])
+      ([], var "Integer", [])
 
   | (_schemaType s == Just OpenApiInteger) =
       case _schemaFormat s of
@@ -411,13 +448,13 @@ schemaToType' gs p n s
   | (_schemaType s == Just OpenApiArray) =
       case _schemaItems s of
         Just (OpenApiItemsObject (Ref (Reference r))) ->
-          ([(textToPascalName r, [textToPascalName r])], var "StripeList" @@ (var $ textToPascalName r), [])
+          ([(textToPascalName r, [textToPascalName r])], {- var "StripeList" -} listTy (var $ textToPascalName r), [])
         Just (OpenApiItemsObject (Inline s)) ->
               let name = {- case _schemaTitle s of
                     (Just t) -> t
                     Nothing  -> -} n
                   (imports, ty, decls) = schemaToType' gs "FixMe4a" name s
-              in (imports, var "StripeList" @@ ty, decls)
+              in (imports, {- var "StripeList" @@ -} listTy ty, decls)
         Nothing -> ([], var "FixMeOpenApiItemsObject", [])
   | (_schemaType s == Just OpenApiObject) =
       case (_schemaAdditionalProperties s) of
@@ -499,13 +536,13 @@ schemaToType' gs p n s
 
 schemaToType' _ p n s = error $ show $ (n, ppSchema s)
 -- schemaToType' _ _ = (var "FixMe", [])
-
+{-
 mkNullable :: Schema -> HsType' -> HsType'
 mkNullable s ty =
   case _schemaNullable s of
     (Just True) -> var "Maybe" @@ ty
     _           -> ty
-
+-}
 textToOccName = fromString . T.unpack
 
 mkRequired :: (Var a, App a) => Bool -> a -> a
@@ -523,9 +560,9 @@ schemaToField gs wrapPrim instStripeParam required objectName (n, Inline s)
       , []
       )
   | _schemaType s == Just OpenApiInteger && (n `elem` ["amount", "amount_captured", "amount_refunded", "application_fee_amount"]) =
-      let ty = case _schemaNullable s of
-                 (Just True) -> var "Maybe" @@ var "Amount"
-                 _           -> var "Amount"
+      let ty = if ((Just True == _schemaNullable s) || ((not $ null required)  && (not $ n `elem` required)))
+               then var "Maybe" @@ var "Amount"
+               else var "Amount"
       in ([]
          , (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ ty)
          , []
@@ -720,8 +757,9 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
 -}
         -- check for NowOrLater
         (Just [(Inline schema1), (Inline schema2)])
-          | _schemaEnum schema1 == Just [ Aeson.String "now" ] &&
-            (_schemaType schema2 == Just OpenApiInteger) && (_schemaFormat schema2 == Just "unix-time")
+          |  _schemaEnum   schema1 == Just [ Aeson.String "now" ] &&
+            (_schemaType   schema2 == Just OpenApiInteger) &&
+            (_schemaFormat schema2 == Just "unix-time")
             -> let occName   = fromString (textToPascalName tyName)
                    conName   = fromString (textToPascalName tyName)
                    unConName = fromString ("un" <> textToPascalName tyName)
@@ -778,7 +816,9 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                         if gs == AllDeclarations
                         then  data' occName [] cons derivingCommon : mkFromJSON tyName s : instances
                               -- the are things that are anyOf things which are ids. We should probably detect this pattern, but it is rare enough that this list works for now.
-                        else  data' occName [] [] [] : [ instance' (var n @@ var (textToPascalName tyName)) [] | n <- derivingNames ] ++  instances
+                        else  data' occName [] [] [] :
+                              ( instance' (var "FromJSON" @@ var (textToPascalName tyName)) []) :
+                              [ instance' (var n @@ var (textToPascalName tyName)) [] | n <- derivingNames ] ++  instances
                   in (concat (imports ++ imports'), dataDecls ++ (concat decls), concat toStripeParamBuilder')
 
 {-
@@ -882,9 +922,13 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
         -}
         Just (OpenApiItemsObject (Inline s))
           | _schemaType s == Just OpenApiString ->
-              let occName = fromString (textToPascalName $ tyName)
-                  con = recordCon occName [(fromString $ "un" <> textToPascalName tyName, field $ listTy $ var "Text")]
-                  inst = case instToStripeParam of
+              case _schemaEnum s of
+                Nothing ->
+                  let occName = fromString (textToPascalName $ tyName)
+                      con = recordCon occName [(fromString $ "un" <> textToPascalName tyName, field $ listTy $ var "Text")]
+                      ty = newtype' occName [] con (derivingCommon' gs)
+                      json = mkFromJSON tyName s
+                      inst = case instToStripeParam of
                            SkipToStripeParam -> []
                            TopToStripeParam ->
                                [ instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
@@ -899,7 +943,10 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                                ]
                            _ -> []
 
-          in ([], (newtype' occName [] con (derivingCommon' gs)) : inst, []) -- : concat decls
+                  in ([], (ty : json : inst), []) -- : concat decls
+                (Just _) ->
+                  let (ty_, decls, binds) = schemaToEnumDecl instToStripeParam objName tyName s
+                  in ([], decls, binds)
 
         Just (OpenApiItemsObject (Inline s)) ->
           trace (T.unpack $ "We should probably actually do something here. inline - " <> tyName {- <> (show (ppSchema s)) -}) $
@@ -963,10 +1010,13 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                      ]
                    _ -> []
           con = recordCon occName fields
+          json = mkFromJSON tyName s
+
       in case gs of
-           AllDeclarations -> (concat imports, (data' occName [] [con] (derivingCommon' gs))  : (inst ++ concat decls), [])
+           AllDeclarations -> (concat imports, (data' occName [] [con] (derivingCommon' gs))  : (json : inst ++ concat decls), [])
            HsBoot -> ([]
                      , data' occName [] [] [] :
+                       (instance' (var "FromJSON" @@ var (textToPascalName name)) []) :
                           [instance' (var n @@ var (textToPascalName name)) [] | n <- derivingNames ]
                      , []
                      )
@@ -1129,8 +1179,10 @@ responseType resp =
         (Just (Inline schema)) ->
           case InsOrd.lookup "data" (_schemaProperties schema) of
             (Just (Inline dataSchema)) ->
-              let (imports, ty, _) = schemaToType AllDeclarations "FixMeResponseType1" "FixMeResponseType" dataSchema
-              in (imports, ty)
+              case _schemaItems dataSchema of
+                (Just (OpenApiItemsObject itemTypeSchema)) ->
+                  let (imports, ty, _) = referencedSchemaToType AllDeclarations "FixMeResponseType1" "FixMeResponseType" itemTypeSchema
+                  in (imports, var "StripeList" @@ ty)
             Nothing ->
               case _schemaAnyOf schema of
                 (Just anyOf) ->
@@ -1380,9 +1432,18 @@ mkOwnMods (Just modBaseName, decls) =
   in  mkPathModule modBaseName pathImports opDecls additionalExports
 
 mkPathModule modBaseName pathImports decls exports =
-  do let imports = [ import' "Data.Data" `exposing` [ var "Data" ]
+  do let imports = [ import' "Control.Monad" `exposing` [ var "mzero" ]
+                   , qualified' $ import'  "Data.Aeson"
+                   , import' "Data.Aeson" `exposing` [ thingWith "FromJSON" [ "parseJSON" ]
+                                                     , thingAll "ToJSON"
+                                                     , thingWith "Value" [ "String", "Object", "Bool" ]
+                                                     , var "(.:)"
+                                                     , var "(.:?)"
+                                                     -- , var "Object"
+                                                     ]
+                   , import' "Data.Data" `exposing` [ var "Data" ]
                    , import' "Data.Time.Clock" `exposing` [ var "UTCTime" ]
-                   , import' "Data.Text" `exposing` [ var "Text" ]
+                   , import' "Data.Text" `exposing` [ var "Text", var "unpack" ]
                    , import' "Data.Text.Encoding" `exposing` [ var "encodeUtf8" ]
                    , import' "Web.Stripe.StripeRequest" `exposing`
                        [ thingAll "Method"
@@ -1434,94 +1495,22 @@ mkPaths :: OpenApi -- ^ openapi spec
         -> NonEmpty String    -- ^ module name -- just the last bit like 'Account'
         -> IO ()
 mkPaths oa paths modBaseName =
-  do let (thisMod, ownMods') = partition (isNothing . fst) $ concatMap (mkPath oa modBaseName) paths
+  do {- let (thisMod, ownMods') = partition (isNothing . fst) $ concatMap (mkPath oa modBaseName) paths
          ownsMods' = Map.toList $ Map.fromListWith (<>) ownMods'
          (pathImports, opDecls, {- reexportTypes, -} additionalExports) = unzip3Concat $ map snd thisMod
---         requestBodyProperties =
---           concatMap findPropertiesInPathItems (lookupPaths (_openApiPaths oa) paths)
---         (propImports', propDecls') = unzip $ map (uncurry (schemaToTypeDecls AllDeclarations "FixMeMkPaths")) ([ (t, s) | (t, Inline s) <- requestBodyProperties ])
---         (propImports, propDecls) = (nub $ concat propImports', concat propDecls')
      mkPathModule modBaseName pathImports opDecls Nothing
-{-
-         exports = Nothing -- Just (nub $ {- reexportTypes ++ -} (map var (additionalExports)))
-         imports = [ import' "Data.Aeson" `exposing` [ thingWith "FromJSON" [ "parseJSON" ]
-                                             , thingAll "ToJSON"
-                                             , thingWith "Value" [ "String", "Object", "Bool" ]
-                                             , var "(.:)"
-                                             , var "(.:?)"
-                                             ]
-                   , import' "Data.Aeson.Types" `exposing` [ var "typeMismatch" ]
-                   , qualified' $ import' "Data.Aeson" `as'` "Aeson"
-                   , import' "Data.Data" `exposing` [ var "Data" ]
-                   , import' "Data.Text" `exposing` [ var "Text" ]
-                   , import' "Data.Text.Encoding" `exposing` [ var "encodeUtf8" ]
-                   , import' "Web.Stripe.OneOf" `exposing`
-                      [ thingAll "OneOf"
-                      ]
-                   , import' "Web.Stripe.StripeRequest" `exposing`
-                     [ thingAll "Method"
-                     , thingWith "StripeHasParam" []
-                     , thingAll "StripeRequest"
-                     , thingAll "ToStripeParam"
-                     , var "StripeReturn"
-                     , var "mkStripeRequest"
-                     ]
-                   , import' "Web.Stripe.Types" `exposing`
-                      [ thingWith "Currency" []
-                        -- , thingWith "Created" []
-                      , thingAll "Emptyable"
-                      , thingAll "ExpandParams"
-                      , thingAll "Metadata"
-                      , thingAll "StripeList"
-                      , thingAll "StartingAfter"
-                      , thingAll "EndingBefore"
-                      , thingAll "Limit"
-                      , thingAll "NowOrLater"
-                      ]
-                   , import' "Web.Stripe.Util" `exposing` [ var "(</>)"
-                                                          , var "toBytestring"
-                                                          , var "toSeconds"
-                                                          ]
-                   ] ++ (map mkImport ({- propImports ++ -} pathImports))
-         modul  = module' (Just $ fromString $ "Web.Stripe." <> foldr1 (\a b -> a <> "." <> b) modBaseName) exports imports (opDecls {- ++ propDecls -})
-         extensions = [ DataKinds
-                      , DeriveDataTypeable
-                      , FlexibleInstances
-                      , MultiParamTypeClasses
-                      , OverloadedStrings
-                      , TypeFamilies
-                      ]
-     formatted <- showModule ("Web/Stripe/" <> foldr1 (\a b -> a <> "/" <> b) modBaseName <> ".hs") extensions modul False
---     T.putStr formatted
-     let filepath = "_generated/src/Web/Stripe/" <> foldr1 (\a b -> a <> "/" <> b) modBaseName <> ".hs"
-     createDirectoryIfMissing True (takeDirectory filepath)
-     T.writeFile filepath formatted
--}
      mapM_ mkOwnMods ownMods'
+     -}
+     mapM_ (mkPath oa modBaseName) paths
      pure ()
-  {-
-  do let (Just pi) = InsOrd.lookup path (_openApiPaths oa)
-         (Just op) = _pathItemGet pi
-         (opDecls, reexports, additionalExports) = mkOperation path "GET" idName op
-     let reexportTypes = map thingAll reexports
-
-         imports = [ import' "Web.Stripe.StripeRequest" `exposing`
-                     [ thingWith "Method" ["GET"]
-                     , thingAll "StripeRequest"
-                     , var "StripeReturn"
-                     , var "mkStripeRequest" ]
-                   , import' "Web.Stripe.Types" `exposing` reexportTypes
-                   ]
-         exports = Just (reexportTypes ++ (map var additionalExports))
--}
 
 mkPath :: OpenApi
        -> NonEmpty String    -- ^ module name -- just the last bit like 'Account'
        -> (FilePath, Maybe Text)
-       -> [(Maybe (NonEmpty String), ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [RdrNameStr]))]
+       -> IO () -- [(Maybe (NonEmpty String), ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [RdrNameStr]))]
 mkPath oa modBasePath (path, idName) =
-  mkPath' oa modBasePath GET  (path, idName) -- <>
---  mkPath' oa modBasePath POST (path, idName)
+  do mkPath' oa modBasePath GET  (path, idName) -- <>
+     mkPath' oa modBasePath POST (path, idName)
 {-
 mkPath oa (path, idName) =
   let (Just pi) = InsOrd.lookup path (_openApiPaths oa)
@@ -1544,15 +1533,24 @@ mkPath' :: OpenApi
         -> NonEmpty String    -- ^ module name -- just the last bit like 'Account'
         -> Method
         -> (FilePath, Maybe Text)
-        -> [(Maybe (NonEmpty String), ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [RdrNameStr]))]
-mkPath' oa modBasePath method (path, idName) =
+        -> IO () -- [(Maybe (NonEmpty String), ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [RdrNameStr]))]
+mkPath' oa modBaseName' method (path, idName) =
   let (Just pi) = InsOrd.lookup path (_openApiPaths oa)
+      modBaseName =
+        case modBaseName' of
+          (hd :| tl) -> (hd <> (case method of GET -> "Get" ; POST -> "Post")) :| tl
+
       mop = case method of
                     GET  -> _pathItemGet pi
                     POST -> _pathItemPost pi
   in case mop of
-       Nothing   -> []
-       (Just op) -> mkOperation modBasePath path method idName op
+       Nothing   -> pure ()
+       (Just op) ->
+         do let (thisMod, ownMods') = partition (isNothing . fst) $ mkOperation modBaseName path method idName op
+                ownsMods' = Map.toList $ Map.fromListWith (<>) ownMods'
+                (pathImports, opDecls, {- reexportTypes, -} additionalExports) = unzip3Concat $ map snd thisMod
+            mkPathModule modBaseName pathImports opDecls Nothing
+            mapM_ mkOwnMods ownMods'
 {-
         Nothing -> ([],[],[])
         (Just op) ->
@@ -1574,15 +1572,45 @@ mkPath' oa modBasePath method (path, idName) =
 
 mkFromJSON :: Text -> Schema -> HsDecl'
 mkFromJSON name s =
-  let properties = sortOn fst $ (InsOrd.toList (_schemaProperties s))
-  in instance' (var "FromJSON" @@ (var $ textToPascalName name))
-       [ funBinds "parseJSON" [ match [bvar "(Data.Aeson.Object o)"] $
+  case _schemaAnyOf s of
+    (Just schemas) ->
+      instance' (var "FromJSON" @@ (var $ textToPascalName name))
+      {-
+         [ funBinds "parseJSON" [ match [bvar "(Data.Aeson.Object o)"] $
                               case properties of
                                 [] -> (var "pure") @@ (var "undefined") --  (var $ textToPascalName name)  -- FIXME
                                 _  -> op' (var $ textToPascalName name) "<$>" $ addAp $ map (mkJsonField name) $ properties
                                                     ]
-       , funBinds "parseJSON" [ match [wildP] (var "mzero") ]
-       ]
+-}
+         [ funBinds "parseJSON" [ match [wildP] (var "error" @@ (op (string "fromJSON = ") "++" (string $ T.unpack name))) ]
+         ]
+    Nothing ->
+      case _schemaEnum s of
+        (Just vs) ->
+          let mkConName :: (IsString a) => Text -> a
+              mkConName c
+                | T.isSuffixOf "version" name  = textToPascalName ("V" <> c) -- maybe instead of looking at the type suffix, which should look if the constructor starts with a number
+                | otherwise         = textToPascalName (withPrefixEnumCon name c)
+          in
+          instance' (var "FromJSON" @@ (var $ textToPascalName name))
+             [ funBinds "parseJSON" [ match [conP "String" [bvar "c"]] $
+                                              case' (var "c")
+                                                ([ match [ string (T.unpack v) ] (var "pure" @@ var (mkConName v)) | (Aeson.String v) <- vs ] ++
+                                                 [ match [ bvar "s" ] (var "fail" @@ ( op (string "Failed to parse JSON value ") "++" (var "unpack" @@ var "s"))) ])
+                                    , match [bvar "j"] (var "fail" @@ ( op (string "Failed to parse JSON value ") "++" (var "show" @@ var "j")))
+                                    ]
+             ]
+
+        Nothing ->
+          let properties = sortOn fst $ (InsOrd.toList (_schemaProperties s))
+          in instance' (var "FromJSON" @@ (var $ textToPascalName name))
+             [ funBinds "parseJSON" [ match [bvar "(Data.Aeson.Object o)"] $
+                              case properties of
+                                [] -> (var "pure") @@ (var "undefined") --  (var $ textToPascalName name)  -- FIXME
+                                _  -> op' (var $ textToPascalName name) "<$>" $ addAp $ map (mkJsonField name (_schemaRequired s)) $ properties
+                                                    ]
+             , funBinds "parseJSON" [ match [wildP] (var "mzero") ]
+             ]
 
 op' :: HsExpr' -> RdrNameStr -> HsExpr' -> HsExpr'
 op' x o y =
@@ -1592,20 +1620,24 @@ addAp :: [HsExpr'] -> HsExpr'
 addAp [a] = a
 addAp (a:rs) =  (op' a "<*>" (addAp rs))
 
-mkJsonField :: Text -> (Text, Referenced Schema) -> HsExpr'
+mkJsonField :: Text -> [Text] -> (Text, Referenced Schema) -> HsExpr'
 -- mkJsonField objName ("amount", (Inline s)) = par (op' (var "Amount") "<$>" (op (var "o") ".:"  (string "amount")))
 -- mkJsonField objName ("amount_refunded", (Inline s)) = par (op' (var "Amount") "<$>" (op (var "o") ".:"  (string "amount_refunded")))
-mkJsonField objName ("id", (Inline s)) = par (op' (var (textToPascalName $ objName <> "_id")) "<$>" (op (var "o") ".:"  (string "id")))
-mkJsonField _ (fieldName, (Inline s)) =
-  let oper = case _schemaNullable s of
-               (Just True) -> ".:?"
-               _           -> ".:"
+mkJsonField objName requiredFields ("id", (Inline s))
+  | not ("id" `elem` requiredFields) &&  (not $ null requiredFields) =
+    par (op' (var "fmap" @@ (var (textToPascalName $ objName <> "_id"))) "<$>" (op (var "o") ".:?"  (string "id")))
+  | otherwise =
+    par (op' (var (textToPascalName $ objName <> "_id")) "<$>" (op (var "o") ".:"  (string "id")))
+mkJsonField _ requiredFields (fieldName, (Inline s)) =
+  let oper = if ((Just True == _schemaNullable s) || ((not $ null requiredFields)  && (not $ fieldName `elem` requiredFields)))
+             then ".:?"
+             else ".:"
       val = case () of
         () -- | (_schemaType s == Just OpenApiInteger) && (_schemaFormat s == Just "unix-time") ->
                -- par $ (var "fromSeconds") @@ (op (var "o") ".:" (string $ T.unpack fieldName))
            | otherwise -> (string $ T.unpack fieldName)
     in op' (var "o") oper val
-mkJsonField _ (fieldName, (Ref r)) =
+mkJsonField _ requiredFields (fieldName, (Ref r)) =
   op (var "o") ".:"  (string $ T.unpack fieldName)
 
 
@@ -1634,7 +1666,12 @@ mkId gs baseName =
                                            , match [ wildP ] (var "mzero")
                                            ]
                     ]
-                  , typeInstance' ("ExpandsTo "<> T.unpack (textToPascalName (baseName <> "_id")))  hsOuterImplicit [] Prefix (var $ fromString $ T.unpack $ textToPascalName baseName)
+                  , instance' (var "FromJSON" @@ (var "Expandable" @@ (var $ fromString $ T.unpack n)))
+                     [ funBinds "parseJSON" [ match [ bvar "v" ] (op (op (var "ID") "<$>" (var "parseJSON" @@ var "v")) "<|>"
+                                                                     (op (var "Expanded") "<$>" (var "parseJSON" @@ var "v")))
+                                            ]
+                     ]
+                  , typeInstance' ("ExpandsTo "<> T.unpack (textToPascalName (baseName <> "_id"))) hsOuterImplicit [] Prefix (var $ fromString $ T.unpack $ textToPascalName baseName)
                   , instance' (var "ToStripeParam" @@ (var $ fromString $ T.unpack n))
                       [ funBinds "toStripeParam" [ match [ conP (fromString $ T.unpack n) [ bvar "t" ] ]
                                                                ( var ":" @@ (tuple [string $ T.unpack baseName
@@ -1645,7 +1682,11 @@ mkId gs baseName =
                   ] ++
                   [ standaloneDeriving (var cn @@ (var "Expandable" @@ (var $ fromString $ T.unpack n)) )  | cn <- derivingNames  ]
 --                  [ instance' (var cn @@ (var "Expandable" @@ (var $ fromString $ T.unpack n))) [] | cn <- derivingNames  ]
-             else [instance' (var cn @@ (var "Expandable" @@ (var $ fromString $ T.unpack n))) [] | cn <- derivingNames ]
+             else [ instance' (var cn @@ (var "Expandable" @@ (var $ fromString $ T.unpack n))) [] | cn <- derivingNames ] ++
+                  [ instance' (var "FromJSON" @@ (var $ fromString $ T.unpack n)) []
+                  , instance' (var "FromJSON" @@ (var "Expandable" @@ (var $ fromString $ T.unpack n))) []
+--                  , instance' (var "FromJSON" @@ (var $ textToPascalName $ baseName)) []
+                  ]
       -- FIXME: this is definitely not the right way to call typeInstance'
 
 
@@ -1742,14 +1783,16 @@ mkComponent component@(name, schema) =
                                              , thingWith "Value" [ "String", "Object", "Bool" ]
                                              , var "(.:)"
                                              , var "(.:?)"
+--                                             , var "Object"
                                              ]
-           , import' "Data.Aeson.Types" `exposing` [ var "typeMismatch" ]
+           , import' "Data.Aeson.Types" `exposing` [ var "typeMismatch"
+                                                   ]
            , qualified' $ import' "Data.Aeson" `as'` "Aeson"
            , import' "Data.Data"  `exposing` [ var "Data", var "Typeable" ]
            , qualified' $ import' "Data.HashMap.Strict" `as'` "H"
            , import' "Data.Map"   `exposing` [ var "Map" ]
            , import' "Data.Ratio" `exposing` [ var "(%)" ]
-           , import' "Data.Text"  `exposing` [ var "Text" ]
+           , import' "Data.Text"  `exposing` [ var "Text", var "unpack" ]
            , import' "Data.Text.Encoding" `exposing` [ var "encodeUtf8" ]
            , import' "Data.Time"  `exposing` [ var "UTCTime" ]
 --           , import' "Numeric"  `exposing` [ var "fromRat" , var "showFFLoat" ]
@@ -1759,7 +1802,15 @@ mkComponent component@(name, schema) =
            , import' "Web.Stripe.StripeRequest" `exposing`
                        [ thingAll "ToStripeParam"
                        ]
-           , import' "Web.Stripe.Types"
+           , import' "Web.Stripe.Types" `exposing` [ thingAll "Expandable"
+                                                   , thingAll "StripeList"
+                                                   , thingAll "Lines"
+                                                   , var "ExpandsTo"
+                                                   , var "Amount"
+                                                   , var "Currency"
+                                                   , var "UseStripeSdk"
+                                                   , var "Status"
+                                                   ]
            , import' "Web.Stripe.Util"  `exposing` [ var "fromSeconds" ]
            ]
          exports = Nothing
@@ -1804,19 +1855,29 @@ mkHsBoot component@(name, schema)
                                              , thingWith "Value" [ "String", "Object", "Bool" ]
                                              , var "(.:)"
                                              , var "(.:?)"
+--                                             , var "Object"
                                              ]
-           , import' "Data.Aeson.Types" `exposing` [ var "typeMismatch" ]
+           , import' "Data.Aeson.Types" `exposing` [ var "typeMismatch"
+                                                   ]
            , import' "Data.Data"  `exposing` [ var "Data", var "Typeable" ]
            , qualified' $ import' "Data.HashMap.Strict" `as'` "H"
            , import' "Data.Map"   `exposing` [ var "Map" ]
            , import' "Data.Ratio" `exposing` [ var "(%)" ]
-           , import' "Data.Text"  `exposing` [ var "Text" ]
+           , import' "Data.Text"  `exposing` [ var "Text", var "unpack" ]
            , import' "Data.Time"  `exposing` [ var "UTCTime" ]
 --           , import' "Numeric"  `exposing` [ var "fromRat" , var "showFFLoat" ]
            , import' "Text.Read"  `exposing` [ var "lexP", var "pfail" ]
            , qualified' $ import' "Text.Read" `as'` "R"
            , import' "Web.Stripe.OneOf" `exposing` [ thingAll "OneOf" ]
-           , import' "Web.Stripe.Types"
+           , import' "Web.Stripe.Types" `exposing` [ thingAll "Expandable"
+                                                   , thingAll "StripeList"
+                                                   , thingAll "Lines"
+                                                   , var "ExpandsTo"
+                                                   , var "Amount"
+                                                   , var "Currency"
+                                                   , var "UseStripeSdk"
+                                                   , var "Status"
+                                                   ]
            , import' "Web.Stripe.Util"  `exposing` [ var "fromSeconds" ]
            ]
          exports = Nothing
@@ -1861,13 +1922,15 @@ mkTypes oa =
                                              , thingWith "Value" [ "String", "Object", "Bool" ]
                                              , var "(.:)"
                                              , var "(.:?)"
+--                                             , var "Object"
                                              ]
-           , import' "Data.Aeson.Types" `exposing` [ var "typeMismatch" ]
+           , import' "Data.Aeson.Types" `exposing` [ var "typeMismatch"
+                                                   ]
            , import' "Data.Data"  `exposing` [ var "Data", var "Typeable" ]
            , qualified' $ import' "Data.HashMap.Strict" `as'` "H"
            , import' "Data.Map"   `exposing` [ var "Map" ]
            , import' "Data.Ratio" `exposing` [ var "(%)" ]
-           , import' "Data.Text"  `exposing` [ var "Text" ]
+           , import' "Data.Text"  `exposing` [ var "Text", var "unpack" ]
            , import' "Data.Time"  `exposing` [ var "UTCTime" ]
 --           , import' "Numeric"  `exposing` [ var "fromRat" , var "showFFLoat" ]
            , import' "Text.Read"  `exposing` [ var "lexP", var "pfail" ]
@@ -1887,12 +1950,18 @@ mkTypes oa =
 --                 , data' "FixMe4bId" []  [ prefixCon "FixMe4bId" [] ] derivingCommon
 --                 , typeInstance' "ExpandsTo FixMe4bId"  hsOuterImplicit [] Prefix (var "FixMe4bId")
                  , data' "UseStripeSdk" []  [ prefixCon "UseStripeSdk" [] ] derivingCommon
-                 , instance' (var "FromJSON" @@ var "UseStripeSdk") [ funBinds "parseJSON" [ match []  (var "undefined")] ]
+                 , instance' (var "FromJSON" @@ var "UseStripeSdk")
+                     -- FIXME: UseStripeSdk is supported to be a hash
+                     [ funBinds "parseJSON" [ match [bvar "(Data.Aeson.Object o)"]  (var "pure" @@ var "UseStripeSdk") ] --  (var "pure" @@ (var "UseStripeSdk" @@ var "o"))]
+                     ]
 --                 , instance' (var "FromJSON" @@ var "StripeType") [ funBinds "parseJSON" [ match []  (var "undefined")] ]
 --                 , data' "Refunds" []  [ prefixCon "Refunds" [] ] derivingCommon
-                 , data' "Expandable" [ bvar "id" ] [ prefixCon "Id" [ field $ var "id" ]
+                 , data' "Expandable" [ bvar "id" ] [ prefixCon "ID" [ field $ var "id" ]
                                                     , prefixCon "Expanded"  [field $ var "ExpandsTo" @@ var "id"]
                                                     ] [ deriving' [ var "Typeable" ]]
+                 , typeInstance' "ExpandsTo (OneOf [a,b])" hsOuterImplicit [] Prefix (var "OneOf" @@ (listPromotedTy [ var "ExpandsTo" @@  var "a", var "ExpandsTo" @@ var "b"]))
+                 , typeInstance' "ExpandsTo (OneOf [a,b,c])" hsOuterImplicit [] Prefix (var "OneOf" @@ (listPromotedTy [ var "ExpandsTo" @@  var "a", var "ExpandsTo" @@ var "b", var "ExpandsTo" @@ var "c"]))
+
                  , standaloneDeriving $ [ var "Data" @@ var "id"
                                         , var "Data" @@ (var "ExpandsTo" @@ var "id")
                                         ] ==> (var "Data" @@ (var "Expandable" @@ var "id"))
@@ -1924,7 +1993,7 @@ mkTypes oa =
                               , var "FromJSON" @@ (var "ExpandsTo" @@ var "id")
                               ] ==> var "FromJSON" @@ (var "Expandable" @@ var "id"))
                               [ funBinds "parseJSON" [ match [bvar "v"] $
-                                                       op (op  (var "Id") "<$>" (var "parseJSON" @@ var "v"))
+                                                       op (op  (var "ID") "<$>" (var "parseJSON" @@ var "v"))
                                                           "<|>"
                                                           (op (var "Expanded") "<$>" (var "parseJSON" @@ var "v"))
                                                      ]
@@ -1953,7 +2022,17 @@ mkTypes oa =
                        , ("hasMore"   , field $ var "Bool")
                        ]
                     ] derivingCommon
-                 , instance' (var "FromJSON" @@ (var "StripeList" @@ var "a")) [ funBinds "parseJSON" [ match []  (var "undefined")] ]
+                 , instance' ([var "FromJSON" @@ var "a"] ==> (var "FromJSON" @@ (var "StripeList" @@ var "a")))
+                     [ funBinds "parseJSON" [ match [bvar "(Data.Aeson.Object o)"] $
+                                              op' (var "StripeList") "<$>" $ addAp [ op (var "o") ".:"  (string "data")
+                                                                                   , op (var "o") ".:"  (string "url")
+                                                                                   , op (var "o") ".:"  (string "object")
+                                                                                   , op (var "o") ".:?" (string "total_count")
+                                                                                   , op (var "o") ".:"  (string "has_more")
+                                                                                   ]
+                                            ]
+--                                              (var "StripeList") @@ op' (var $ textToPascalName name) "<$>" $ addAp $ map (mkJsonField name) $ properties
+                     ]
                  , newtype' "ExpandParams" [] (recordCon "ExpandParams" [ ( fromString "getExpandParams", field $ listTy (var "Text"))])  derivingCommon
                  , newtype' "EndingBefore" [ bvar "a" ] (recordCon "EndingBefore" [ ( fromString "getEndingBefore", field $ var "a") ])  derivingCommon
                  , newtype' "StartingAfter" [ bvar "a" ] (recordCon "StartingAfter" [ ( fromString "getStartingAfter", field $ var "a") ])  derivingCommon
@@ -1966,10 +2045,20 @@ mkTypes oa =
                     [ recordCon "Lines"
                        [ ("linesData"   , field $ listTy (var "a"))
                        , ("linesUrl"    , field $ var "Text")
-                       , ("linesObject" , field $ var "Text")
+                       , ("linesObject" , field $ var "Text") -- the spec seems to indicate this will always be the string 'lines'
                        , ("linesHasMore", field $ var "Bool")
                        ]
                     ]  derivingCommon
+                 , instance' ([var "FromJSON" @@ var "a"] ==> var "FromJSON" @@ (var "Lines" @@ var "a"))
+                     [ funBinds "parseJSON" [ match [bvar "(Data.Aeson.Object o)"] $
+                                              op' (var "Lines") "<$>" $ addAp [ op (var "o") ".:"  (string "data")
+                                                                              , op (var "o") ".:"  (string "url")
+                                                                              , op (var "o") ".:"  (string "object")
+                                                                              , op (var "o") ".:"  (string "has_more")
+                                                                              ]
+                                            ]
+--                                              (var "StripeList") @@ op' (var $ textToPascalName name) "<$>" $ addAp $ map (mkJsonField name) $ properties
+                     ]
                  , data' "Emptyable" [ bvar "a" ]
                     [ prefixCon "Full"  [ strict $ field $ var "a" ]
                     , prefixCon "Empty" []
@@ -1979,6 +2068,15 @@ mkTypes oa =
                     , prefixCon "Inactive" []
                     , prefixCon "Pending" []
                     ] derivingCommon
+                 , instance' (var "FromJSON" @@ var "Status")
+                     [ funBinds "parseJSON" [ match [ conP "String" [ bvar "c" ] ] $
+                                                case' (var "c")
+                                                 [ match [ string "active" ] (var "pure" @@ var "Active")
+                                                 , match [ string "inactive" ] (var "pure" @@ var "Inactive")
+                                                 , match [ string "pending" ] (var "pure" @@ var "Pending")
+                                                 ]
+                                            ]
+                     ]
 {-
                  , type' "PaymentSourceId" [] (var "OneOf" @@ listPromotedTy [ var "AccountId"
                                                                              ] )
@@ -1997,8 +2095,14 @@ mkTypes oa =
                                   , var "Typeable"
                                   ]
                       ]
+                 , instance' (var "FromJSON" @@ var "Currency")
+                     [ funBinds "parseJSON" [ match [ conP "String" [ string "USD" ] ] ( var "pure" @@ var "USD" )
+                                            , match [ wildP ]                          ( var "pure" @@ var "USD" )
+                                            ]
+                     ] -- FIXME: add all currencies
+
                  , newtype' "Amount" [] (recordCon "Amount" [ ("getAmount", field $ var "Int") ]) derivingCommon
-                 , instance' (var "FromJSON" @@ var "Amount") [ funBinds "parseJSON" [ match []  (var "undefined")] ]
+                 , instance' (var "FromJSON" @@ var "Amount") [ funBinds "parseJSON" [ match [ bvar "a" ]  (op (var "Amount") "<$>" (var "parseJSON" @@ (var "a")) )] ]
                    -- emptyTimeRange
                  , typeSig "emptyTimeRange" $ var "TimeRange" @@ var "a"
                  , funBind "emptyTimeRange" $ match [] (var "TimeRange" @@ var "Nothing" @@ var "Nothing" @@ var "Nothing" @@ var "Nothing" )
@@ -2135,7 +2239,7 @@ findEnums' (tyName, _schemaEnum -> Just enum) enums =
 
 findEnums'  _ enums = enums
 --findEnums' (tyName, s) _ = error $ show $ (tyName, ppSchema s)
-
+{-
 mkEnums :: GenStyle -> Text -> Map Text (Set Text) -> [HsDecl']
 mkEnums gs p (Map.toList -> enums) = concatMap mkEnum $ {- filter (\(t,c) -> not $ "_payments" `T.isSuffixOf` t) -} enums
   where
@@ -2198,7 +2302,7 @@ mkEnums gs p (Map.toList -> enums) = concatMap mkEnum $ {- filter (\(t,c) -> not
           then [ instance' (var "FromJSON" @@ (var $ textToPascalName typeNm)) [ funBinds "parseJSON" [ match []  (var "undefined")] ]
                ]
           else []
-
+-}
 main :: IO ()
 main =
   do oa <- readSpec

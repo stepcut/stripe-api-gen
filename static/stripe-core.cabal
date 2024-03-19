@@ -845,7 +845,8 @@ library
 --                       Web.Stripe.Recipient
 --                       Web.Stripe.Refund
                        Web.Stripe.StripeRequest
-                       Web.Stripe.Subscriptions
+                       Web.Stripe.SubscriptionsPost
+                       Web.Stripe.SubscriptionsGet
 --                       Web.Stripe.Token
 --                       Web.Stripe.Transfer
                        Web.Stripe.OneOf

@@ -66,7 +66,13 @@ instance (Show e, Typeable e, Show (OneOf s)) => Show (OneOf (e ': s)) where
 instance Read (OneOf a)
 instance (Typeable a) => Data (OneOf (a :: [Type]))
 
-instance FromJSON (OneOf a) where
+instance FromJSON (OneOf '[a]) where
+  parseJSON _ = error "undefined"
+
+instance FromJSON (OneOf '[a, b]) where
+  parseJSON _ = error "undefined"
+
+instance FromJSON (OneOf '[a, b, c]) where
   parseJSON _ = error "undefined"
 
 type family DeleteList e xs where
