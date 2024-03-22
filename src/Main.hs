@@ -492,7 +492,7 @@ schemaToType' gs p n s
       case _schemaAnyOf s of
         (Just [(Inline schema1), (Ref (Reference r))])
           | (_schemaType schema1) == Just OpenApiString ->
-              let r' | r `elem` [ "balance_transaction_source", "payment_source" ] = r
+              let r' | False {- r `elem` [ "balance_transaction_source", "payment_source" ] -} = r
                      | otherwise = r <> "_id"
               in (if p == r then [] else [(textToPascalName r, [textToPascalName r'])], var "Expandable" @@ (var $ fromString $ textToPascalName r'), [])
         _ ->
@@ -808,18 +808,62 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                              ]
                       instances =
                         if (tyName `elem` ["balance_transaction_source", "payment_source"])
-                               then [instance' (var n @@ (var "Expandable" @@ (var $ textToPascalName tyName))) [] | n <- derivingNames ]
+                               then (if gs == AllDeclarations
+                                      then [standaloneDeriving (var n @@ (var "Expandable" @@ (var $ textToPascalName (tyName <> "_id")))) | n <- derivingNames ]
+                                      else [instance' (var n @@ (var "Expandable" @@ (var $ textToPascalName (tyName <> "_id")))) [] | n <- derivingNames ]
+                                    )
 --                               then [standaloneDeriving (var n @@ (var "Expandable" @@ (var $ textToPascalName tyName))) | n <- derivingNames ]
                                else []
+                      (typeImports, typeDecls) =
+                        let refId (Ref (Reference r)) = Just $ (( textToPascalName r, [ textToPascalName (r <> "_id") ]), (var $ textToPascalName (r <> "_id")))
+                            refId (Inline s') = Nothing -- error (show s)
+                            (typeImports', refIds) = unzip $ catMaybes $ map refId schemas
+                            fakeType (Ref (Reference r)) =
+                              Just (newtype' (textToPascalName $ r <> "_id") [] (prefixCon (textToPascalName $ r <> "_id") [ field $ var "String" ]) [])
+                            fakeType _ = Nothing
+                            fakeTypes = if gs == AllDeclarations
+                                        then []
+                                        else [] -- catMaybes (map fakeType schemas)
+                        in (typeImports', [ data' (textToPascalName $ tyName <> "_id") [] -- it would be nicer if this was type alias, but I can't make the .hs-boot files play nicely
+                                              (if gs == AllDeclarations
+                                               then [ recordCon (textToPascalName $ tyName <> "_id")
+                                                      [ ( (fromString $ "un" <> (textToPascalName $ tyName <> "_id") )
+                                                        , (strict $ field $ var "OneOf" @@ listPromotedTy refIds)
+                                                        )
+                                                      ]
+                                                    ]
+                                               else [])
+                                              (if gs == AllDeclarations
+                                               then [ deriving' [ var "Read"
+                                                                , var "Show"
+                                                                , var "Eq"
+                                                                , var "Ord"
+                                                                , var "Data"
+                                                                , var "Typeable"
+                                                                ]
+                                                    ]
+                                               else [
+                                                    ]
+                                              )
+                                          , if gs == AllDeclarations
+                                            then instance' (var "FromJSON" @@ var (textToPascalName $ tyName <> "_id"))
+                                                    [ funBinds "parseJSON" [ match [ bvar "v" ]
+                                                                               (op' (var $ textToPascalName $ tyName <> "_id") "<$>" (var "parseJSON" @@ var "v"))
+                                                                           ]
+                                                    ]
+                                            else instance' (var "FromJSON" @@ var (textToPascalName $ tyName <> "_id")) []
+                                          ])
 
                       dataDecls =
                         if gs == AllDeclarations
-                        then  data' occName [] cons derivingCommon : mkFromJSON tyName s : instances
+                        then  data' occName [] cons derivingCommon : mkFromJSON tyName s :
+                              typeInstance' ("ExpandsTo "<> T.unpack (textToPascalName (tyName <> "_id"))) hsOuterImplicit [] Prefix (var $ fromString $ T.unpack $ textToPascalName tyName) :
+                              instances
                               -- the are things that are anyOf things which are ids. We should probably detect this pattern, but it is rare enough that this list works for now.
                         else  data' occName [] [] [] :
                               ( instance' (var "FromJSON" @@ var (textToPascalName tyName)) []) :
                               [ instance' (var n @@ var (textToPascalName tyName)) [] | n <- derivingNames ] ++  instances
-                  in (concat (imports ++ imports'), dataDecls ++ (concat decls), concat toStripeParamBuilder')
+                  in (typeImports ++ concat (imports ++ imports'), typeDecls ++ dataDecls ++ (concat decls), concat toStripeParamBuilder')
 
 {-
             Nothing ->
@@ -920,15 +964,26 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
         Just (OpenApiItemsObject (Ref (Reference r))) ->
           ([textToPascalName r], var "StripeList" @@ (var $ textToPascalName r), [])
         -}
-        Just (OpenApiItemsObject (Inline s))
-          | _schemaType s == Just OpenApiString ->
-              case _schemaEnum s of
+        Just (OpenApiItemsObject (Inline si))
+          | _schemaType si == Just OpenApiString ->
+              case _schemaEnum si of
                 Nothing ->
-                  let occName = fromString (textToPascalName $ tyName)
-                      con = recordCon occName [(fromString $ "un" <> textToPascalName tyName, field $ listTy $ var "Text")]
-                      ty = newtype' occName [] con (derivingCommon' gs)
-                      json = mkFromJSON tyName s
-                      inst = case instToStripeParam of
+                  case _schemaType si of
+                    (Just pty) | pty `elem`[ OpenApiBoolean, OpenApiInteger, OpenApiNumber, OpenApiString ] ->
+                      let occName = fromString (textToPascalName $ tyName)
+                          primTy = case pty of
+                            OpenApiBoolean -> "Bool"
+                            OpenApiInteger -> "Integer"
+                            OpenApiNumber  ->
+                              case _schemaFormat si of
+                                (Just "float")  -> "Float"
+                                (Just "double") -> "Double"
+                                _               -> "Double"
+                            OpenApiString -> "Text"
+                          con = recordCon occName [(fromString $ "un" <> textToPascalName tyName, field $ listTy $ var primTy)]
+                          ty = newtype' occName [] con (derivingCommon' gs)
+                          json_o = mkFromJSON tyName s
+                          inst = case instToStripeParam of
                            SkipToStripeParam -> []
                            TopToStripeParam ->
                                [ instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
@@ -943,9 +998,9 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                                ]
                            _ -> []
 
-                  in ([], (ty : json : inst), []) -- : concat decls
+                      in ([], (ty : json_o : inst), []) -- : concat decls
                 (Just _) ->
-                  let (ty_, decls, binds) = schemaToEnumDecl instToStripeParam objName tyName s
+                  let (ty_, decls, binds) = schemaToEnumDecl instToStripeParam objName tyName si
                   in ([], decls, binds)
 
         Just (OpenApiItemsObject (Inline s)) ->
@@ -1570,8 +1625,15 @@ mkPath' oa modBaseName' method (path, idName) =
                    ]
 -}
 
+needsMkJSON :: Schema -> Bool
+needsMkJSON s =
+  case _schemaType s of
+    Nothing -> True
+    (Just ts) -> not $ ts `elem` [ OpenApiBoolean, OpenApiInteger, OpenApiNumber, OpenApiString  ]
+
 mkFromJSON :: Text -> Schema -> HsDecl'
 mkFromJSON name s =
+  -- the the schema an AnyOf?
   case _schemaAnyOf s of
     (Just schemas) ->
       instance' (var "FromJSON" @@ (var $ textToPascalName name))
@@ -1585,6 +1647,7 @@ mkFromJSON name s =
          [ funBinds "parseJSON" [ match [wildP] (var "error" @@ (op (string "fromJSON = ") "++" (string $ T.unpack name))) ]
          ]
     Nothing ->
+      -- is the schema an Enum?
       case _schemaEnum s of
         (Just vs) ->
           let mkConName :: (IsString a) => Text -> a
@@ -1602,15 +1665,25 @@ mkFromJSON name s =
              ]
 
         Nothing ->
-          let properties = sortOn fst $ (InsOrd.toList (_schemaProperties s))
-          in instance' (var "FromJSON" @@ (var $ textToPascalName name))
-             [ funBinds "parseJSON" [ match [bvar "(Data.Aeson.Object o)"] $
+          -- is it a list of items?
+          case _schemaItems s of
+            Just (OpenApiItemsObject o) ->
+              instance' (var "FromJSON" @@ (var $ textToPascalName name))
+                [ funBinds "parseJSON" [ match [ bvar "j" ] (op' (var $ textToPascalName name) "<$>" ((var "parseJSON") @@ (var "j"))) ]
+                ]
+            Nothing ->
+--              if (name == "preferred_locales") then (trace (show $ ppSchema s)) else id $
+              let properties = sortOn fst $ (InsOrd.toList (_schemaProperties s))
+              in instance' (var "FromJSON" @@ (var $ textToPascalName name))
+                [ funBinds "parseJSON" [ match [bvar "(Data.Aeson.Object o)"] $
                               case properties of
+                                -- FIXME: the [] case probably happens when there are only additionalPropreties -- aka a dictionary of key/value pairs where th
+                                -- the additionlProperties are the key names
                                 [] -> (var "pure") @@ (var "undefined") --  (var $ textToPascalName name)  -- FIXME
                                 _  -> op' (var $ textToPascalName name) "<$>" $ addAp $ map (mkJsonField name (_schemaRequired s)) $ properties
                                                     ]
-             , funBinds "parseJSON" [ match [wildP] (var "mzero") ]
-             ]
+                , funBinds "parseJSON" [ match [wildP] (var "mzero") ]
+                ]
 
 op' :: HsExpr' -> RdrNameStr -> HsExpr' -> HsExpr'
 op' x o y =
@@ -1686,7 +1759,7 @@ mkId gs baseName =
                   [ instance' (var "FromJSON" @@ (var $ fromString $ T.unpack n)) []
                   , instance' (var "FromJSON" @@ (var "Expandable" @@ (var $ fromString $ T.unpack n))) []
 --                  , instance' (var "FromJSON" @@ (var $ textToPascalName $ baseName)) []
-                  ]
+                  ] ++ [ instance' (var cn @@ (var $ fromString $ T.unpack n)) [] | cn <- derivingNames ]
       -- FIXME: this is definitely not the right way to call typeInstance'
 
 
@@ -1711,21 +1784,24 @@ mkComponents oa =
   mapM_ mkComponent (InsOrd.toList (_componentsSchemas (_openApiComponents oa)))
 
 breakCycle :: String -> RdrNameStr -> Bool
+{-
 breakCycle "File" "FileLink" = True
 breakCycle "Price" "Product" = True
 breakCycle "Account" "ExternalAccount" = True
 breakCycle _ "PaymentMethod" = True
 breakCycle "Customer" "TaxId" = True
 breakCycle "Customer" "Discount" = True
-breakCycle "Customer" "PaymentSource" = True
+-- breakCycle "Customer" "PaymentSource" = True
 breakCycle "Customer" "InvoiceSettingCustomerSetting" = True
 breakCycle "Customer" "Subscription" = True
-breakCycle "Charge" "PaymentSource" = True
+-- breakCycle "Charge" "PaymentSource" = True
+-}
+breakCycle _        "Product" = True
 breakCycle _        "ApiErrors" = True
-breakCycle _        "PaymentSource" = True
+--breakCycle _        "PaymentSource" = True
 breakCycle _        "FileLink" = True
 breakCycle _        "ExternalAccount" = True
-breakCycle _        "PaymentMethod" = True
+--breakCycle _        "PaymentMethod" = True
 breakCycle _        "TaxId" = True
 breakCycle _        "Discount" = True
 breakCycle _        "PaymentSource" = True
@@ -1744,6 +1820,7 @@ breakCycle _        "Invoice" = True
 breakCycle _        "IssuingTransaction" = True
 breakCycle _        "TreasuryTransaction" = True
 breakCycle _        "CustomerBalanceTransaction" = True
+-- breakCycle _        "BankAccount" = True
 
 
 {-
@@ -1818,8 +1895,10 @@ mkComponent component@(name, schema) =
          objectImports = map (\(n, things) -> sourceImport pname n $
                                import' (fromString $ "Web.Stripe.Component."  <> (rdrNameStrToString n))
                                     `exposing` [ thingWith thing [] | thing <- things ] ) (filter (\(n, _) -> (n /= (textToPascalName name))) objectImports')
-         decls = [ -- ExpandsTo
-                 ] ++
+         decls = (if name == "customer"
+                   -- this is a hack. Not sure why GHC can not find the instance that already exists in PaymentSource
+                   then [ typeInstance' "ExpandsTo PaymentSourceId" hsOuterImplicit [] Prefix (var "PaymentSource") ]
+                   else []) ++
                  objectDecls ++
                  concatMap (mkId AllDeclarations) (findIds' component) ++
 --                 mkEnums AllDeclarations name (findEnums' component Map.empty) ++
@@ -1998,6 +2077,11 @@ mkTypes oa =
                                                           (op (var "Expanded") "<$>" (var "parseJSON" @@ var "v"))
                                                      ]
                               ]
+                 , instance' (var "FromJSON" @@ (var "Expandable" @@ (var "OneOf" @@ var "rs")))
+                     [ funBinds "parseJSON" [ match [ wildP ] $
+                                                var "error" @@ string "FromJSON (Expandable (OneOf rs)) not implemented yet"
+                                             ]
+                     ]
                  , data' "TimeRange" [ bvar "a"]
                     [ recordCon "TimeRange"
                         [ ("gt" , field $ var "Maybe" @@ var "a")
@@ -2315,6 +2399,8 @@ main =
      copyFile "static/src/Web/Stripe/OneOf.hs"         "_generated/src/Web/Stripe/OneOf.hs"
      copyFile "static/src/Web/Stripe/Util.hs"          "_generated/src/Web/Stripe/Util.hs"
      copyFile "static/stripe-core.cabal"               "_generated/stripe-core.cabal"
+     copyFile "static/cabal.project"                   "_generated/cabal.project"
+     copyFile "static/shell.nix"                       "_generated/shell.nix"
 
      mkTypes oa
      mkComponents oa
