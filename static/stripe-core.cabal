@@ -845,8 +845,23 @@ library
 --                       Web.Stripe.Recipient
 --                       Web.Stripe.Refund
                        Web.Stripe.StripeRequest
+                       Web.Stripe.CustomersPost
+                       Web.Stripe.CustomersGet
+                       Web.Stripe.PlansPost
+                       Web.Stripe.PlansPost.Expand
+                       Web.Stripe.PlansPost.Tiers
+                       Web.Stripe.PlansPost.TransformUsage
+                       Web.Stripe.PlansGet
                        Web.Stripe.SubscriptionsPost
+                       Web.Stripe.SubscriptionsPost.AddInvoiceItems
+                       Web.Stripe.SubscriptionsPost.AutomaticTax
+                       Web.Stripe.SubscriptionsPost.Expand
+                       Web.Stripe.SubscriptionsPost.Items
+                       Web.Stripe.SubscriptionsPost.PaymentSettings
+                       Web.Stripe.SubscriptionsPost.TransferData
+                       Web.Stripe.SubscriptionsPost.TrialSettings
                        Web.Stripe.SubscriptionsGet
+
 --                       Web.Stripe.Token
 --                       Web.Stripe.Transfer
                        Web.Stripe.OneOf

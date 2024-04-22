@@ -18,7 +18,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isUpper)
 import Data.Function (on)
-import Data.List (partition)
+import Data.List ((\\), partition)
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Set (Set)
@@ -199,7 +199,7 @@ referencedSchemaToType gs objName n (Inline s) = schemaToType gs objName n s
 referencedSchemaToType gs objName n (Ref (Reference r)) =
   let imports
         | (objName == r) = []
-        | otherwise = [(textToPascalName r, [textToPascalName r]) ]
+        | otherwise = [(fromString $ "Component." <> textToPascalName r, [textToPascalName r]) ]
   in (imports, (var $ textToPascalName r), [])
 
 data MkToStripeParam
@@ -207,6 +207,9 @@ data MkToStripeParam
   | TopToStripeParam
   | HelperToStripeParam [Text]
   deriving (Eq, Ord, Read, Show)
+
+-- types defined in Web.Stripe.Types
+webStripeTypesNames = [ "expand", "lines", "line_items", "metadata", "object", "use_stripe_sdk", "currency" ]
 
 -- the `[HsDecl']`in the return value should probably be removed. This
 -- should probably return the name of something that should already
@@ -401,6 +404,8 @@ schemaToType' :: GenStyle
               -> ([(RdrNameStr, [RdrNameStr])], HsType', [HsDecl']) -- ^
 schemaToType' gs p n s
 --  | n == "type" = ([], var "StripeType", [])
+   -- types imported from Web.Stripe.Types
+  | n `elem` webStripeTypesNames = ([], var $ textToPascalName n, [])
   | ((n == "type") && (_schemaType s == Just OpenApiString)) && (_schemaEnum s == Nothing)  = ([], var "Text", [])
   | n == "type" =  ([], var $ textToPascalName (p <> "_type"), [])
   | n == "status"  && (_schemaEnum s == Nothing) && (_schemaType s == Just OpenApiString) =  ([], var "Text", [])
@@ -448,7 +453,7 @@ schemaToType' gs p n s
   | (_schemaType s == Just OpenApiArray) =
       case _schemaItems s of
         Just (OpenApiItemsObject (Ref (Reference r))) ->
-          ([(textToPascalName r, [textToPascalName r])], {- var "StripeList" -} listTy (var $ textToPascalName r), [])
+          ([(fromString $ "Component." <> textToPascalName r, [textToPascalName r])], {- var "StripeList" -} listTy (var $ textToPascalName r), [])
         Just (OpenApiItemsObject (Inline s)) ->
               let name = {- case _schemaTitle s of
                     (Just t) -> t
@@ -494,26 +499,26 @@ schemaToType' gs p n s
           | (_schemaType schema1) == Just OpenApiString ->
               let r' | False {- r `elem` [ "balance_transaction_source", "payment_source" ] -} = r
                      | otherwise = r <> "_id"
-              in (if p == r then [] else [(textToPascalName r, [textToPascalName r'])], var "Expandable" @@ (var $ fromString $ textToPascalName r'), [])
+              in (if p == r then [] else [(fromString $ "Component." <> textToPascalName r, [textToPascalName r'])], var "Expandable" @@ (var $ fromString $ textToPascalName r'), [])
         _ ->
           case InsOrd.lookup "expansionResources" (_unDefs $ _schemaExtensions s) of
             -- we are dealing with an expandable field
             (Just er)
               | n == "discounts" -> -- FIXME: this could also expand to deleted_discount
-                  ([ (textToPascalName "discount", [textToPascalName ("discount_id")])
-                   , (textToPascalName "deleted_discount", [textToPascalName ("deleted_discount_id")])
+                  ([ (fromString $ "Component." <> textToPascalName "discount", [textToPascalName ("discount_id")])
+                   , (fromString $ "Component." <> textToPascalName "deleted_discount", [textToPascalName ("deleted_discount_id")])
                    ], var "Expandable" @@ (var "OneOf" @@ (listPromotedTy [ var $ fromString $ textToPascalName ("discount_id")
                                                                           , var $ fromString $ textToPascalName ("deleted_discount_id")
                                                                           ])), [])
               | n == "account_tax_ids" -> -- FIXME: this could also expand to deleted_account_tax_id
-                  ([ (textToPascalName "tax_id", [textToPascalName ("tax_id_id")])
-                   , (textToPascalName "deleted_tax_id", [textToPascalName ("deleted_tax_id_id")])
+                  ([ (fromString $ "Component." <> textToPascalName "tax_id", [textToPascalName ("tax_id_id")])
+                   , (fromString $ "Component." <> textToPascalName "deleted_tax_id", [textToPascalName ("deleted_tax_id_id")])
                    ], var "Expandable" @@ (var "OneOf" @@ (listPromotedTy [ var $ fromString $ textToPascalName ("tax_id_id")
                                                                           , var $ fromString $ textToPascalName ("deleted_tax_id_id")
                                                                           ])), [])
 
               | not (n `elem` ["default_source", "destination"]) -> -- FIXME: the problem here is that the ID can expand to one of several fields
-              ([(textToPascalName n, [textToPascalName (n <> "_id")])], var "Expandable" @@ (var $ fromString $ textToPascalName (n <> "_id")), [])
+              ([(fromString $ "Component." <> textToPascalName n, [textToPascalName (n <> "_id")])], var "Expandable" @@ (var $ fromString $ textToPascalName (n <> "_id")), [])
             _ ->
               case _schemaAnyOf s of
                 (Just [Inline schema1, Inline schema2])
@@ -528,7 +533,7 @@ schemaToType' gs p n s
                   | (_schemaType schema1 == Just OpenApiString) && (_schemaEnum schema2 == Just [ Aeson.String "" ]) ->
                       ([], var "Emptyable" @@ var "Text", [])
                 (Just [Ref (Reference r)]) ->
-                  ([(textToPascalName r, [textToPascalName r])], (var $ fromString $ textToPascalName r), [])
+                  ([(fromString $ "Component." <> textToPascalName r, [textToPascalName r])], (var $ fromString $ textToPascalName r), [])
                 o ->
                   let (Just schemas) = _schemaAnyOf s
                       (imports, types, decls) = unzip3 $ map (referencedSchemaToType gs p "FixMe7") schemas
@@ -552,6 +557,20 @@ mkRequired False a = var "Maybe" @@ a
 -- when do we use _schemaNullable and when do we use _schemaRequired?
 schemaToField :: GenStyle -> Bool -> MkToStripeParam -> [ParamName] -> Text -> (Text, Referenced Schema) -> ([(RdrNameStr, [RdrNameStr])], (OccNameStr, Field), [HsDecl'], [(Text, RawValBind)])
 schemaToField gs wrapPrim instStripeParam required objectName (n, Inline s)
+  | n == "object" && (_schemaType s == Just OpenApiString) =
+      ([]
+      , (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ var "Text")
+      , []
+      , []
+      )
+      -- sometimes the 'object' field is just a String, but sometimes it is actually an object.
+  | n == "object" && (_schemaType s == Just OpenApiObject) =
+      ([]
+      , (fromString $ textToCamelName (objectName <> "_" <> n), strict $ field $ mkRequired (n `elem` required) $ var "Object")
+      , []
+      , []
+      )
+schemaToField gs wrapPrim instStripeParam required objectName (n, Inline s)
   | n == "id" && _schemaType s == Just OpenApiString =
       -- we don't need to import this id because it is an id that is defined in the local module. Importing it would just cause the module to import itself.
       ([{- (textToPascalName objectName , [textToPascalName $ objectName <> "_id"])-}]
@@ -570,7 +589,7 @@ schemaToField gs wrapPrim instStripeParam required objectName (n, Inline s)
          )
 -- schemaToField _ (n , Ref _)   = ((textToOccName n, strict $ field $ var "FixMe3"), [])
 schemaToField gs wrapPrim instStripeParam required objectName (n , Ref (Reference r))   =
-  ( [(textToPascalName r, [textToPascalName r])], (fromString $ textToCamelName (objectName <> "_" <> n)
+  ( [(fromString $ "Component." <> textToPascalName r, [textToPascalName r])], (fromString $ textToCamelName (objectName <> "_" <> n)
   , strict $ field $ mkRequired (n `elem` required) $ var $ textToPascalName r )
   , []
   , []
@@ -707,9 +726,13 @@ schemaToTypeDecls :: GenStyle -> Bool -> MkToStripeParam -> Text -> Text -> Sche
                   -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [(Text, RawValBind)])
 schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
   -- types which are manually defined in Types
+  | tyName `elem` webStripeTypesNames = ([],[],[])
+  {-
   | tyName `elem` [ {- "Created", "Limit" , "EndingBefore", "StartingAfter" -} ] = ([], [], [])
+  | tyName `elem` [ "object" ] = ([],[],[])
   | tyName `elem` [ "expand", "metadata"] = ([], [], [])
   | tyName `elem` ["lines", "line_items", "use_stripe_sdk", {- "refunds",-} {- "customer_id", -} {- "automatic_tax", -} "currency"] = ([], [], [])
+-}
   | isList s = ([], [], [])
   {-
   | tyName == "default_tax_rates" =
@@ -815,7 +838,7 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
 --                               then [standaloneDeriving (var n @@ (var "Expandable" @@ (var $ textToPascalName tyName))) | n <- derivingNames ]
                                else []
                       (typeImports, typeDecls) =
-                        let refId (Ref (Reference r)) = Just $ (( textToPascalName r, [ textToPascalName (r <> "_id") ]), (var $ textToPascalName (r <> "_id")))
+                        let refId (Ref (Reference r)) = Just $ (( fromString $ "Component." <> (textToPascalName r), [ textToPascalName (r <> "_id") ]), (var $ textToPascalName (r <> "_id")))
                             refId (Inline s') = Nothing -- error (show s)
                             (typeImports', refIds) = unzip $ catMaybes $ map refId schemas
                             fakeType (Ref (Reference r)) =
@@ -1032,6 +1055,15 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
         _ -> trace (T.unpack $ "We should probably actually do something here. 1.     - " <> tyName {- <> (show (ppSchema s)) -}) $
                  ([], [], [])
 
+    -- sometimes a property value is an Object, but the object has no predefined properties, so it is just a dictionary of key/value pairs.
+  | (_schemaType s == Just OpenApiObject) && (null (_schemaProperties s)) =
+      let occName   = fromString (textToPascalName tyName)
+          conName   = fromString (textToPascalName tyName)
+          unConName = fromString ("un" <> textToPascalName tyName)
+          con       = recordCon occName [ ( unConName, field $ var "Object") ]
+          json      = mkFromJSON tyName s
+      in ([], [ newtype' occName [] con [ deriving' [ var "Eq", var "Data", var "Ord", var "Read", var "Show" ]] , json ], [])
+
     -- the assumption here is that we are generating a record for an object?
   | otherwise =
       let name = {-
@@ -1042,9 +1074,8 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                   (Just t) -> t
                   Nothing  -> -} tyName
           occName = fromString (textToPascalName name)
---          (fields, decls) =  unzip $ map (schemaToField (fromMaybe "FixMe2b" (_schemaTitle s))) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
-
-          (imports, fields, decls, toStripeParamBuilders') =  unzip4 $ map (schemaToField gs wrapPrim (HelperToStripeParam [name]) (_schemaRequired s) name) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
+          (imports, fields, decls, toStripeParamBuilders') =
+            unzip4 $ map (schemaToField gs wrapPrim (HelperToStripeParam [name]) (_schemaRequired s) name) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
           inst = case instToStripeParam of
                    SkipToStripeParam -> []
                    TopToStripeParam ->
@@ -1138,7 +1169,7 @@ mkParamName s p =
     "expand" -> ([], fromString "ExpandParams")
     -- things which are actually IDs
     n | n `elem` ["charge", "customer"] ->
-          ([(textToPascalName n, [ textToPascalName (n <> "_id")])], fromString $ textToName (n <> "_id"))
+          ([(fromString ("Component." <> textToPascalName n), [ textToPascalName (n <> "_id")])], fromString $ textToName (n <> "_id"))
     n        -> ([], fromString $ textToName n)
 
   where
@@ -1206,10 +1237,11 @@ mkStripeHasParamFromProperty modBaseName opName (pName, r@(Inline schema)) =
                       (if pn `elem` [ "Metadata" ] then [] else [{- mkToStripeParam pName schema -}])
                  (imports, decls, toStripeParamBuilder) = schemaToTypeDecls AllDeclarations True TopToStripeParam "" pName schema
                  tys = InsOrd.fromList [(pName, decls)]
-                 ownMod
-                      | needsOwnModule schema = Just $ modBaseName <> (NonEmpty.singleton $ textToPascalName pName)
-                      | otherwise = Nothing
-             in (ownMod , pimports ++ imports, insts, tys)
+                 (ownMod, ownModImports)
+                      | needsOwnModule schema =
+                          (Just $ modBaseName <> (NonEmpty.singleton $ textToPascalName pName), [(fromString $ foldr1 (\a b -> a <> "." <> b) modBaseName, [ (UnqualStr opName) ])])
+                      | otherwise = (Nothing, [])
+             in (ownMod , pimports ++ ownModImports ++ imports, insts, tys)
 
 mkStripeRequestBodyStripeHasParam :: NonEmpty String -- ^ module name -- just the last bit like 'Account'
                                   -> OccNameStr
@@ -1245,7 +1277,7 @@ responseType resp =
                 Nothing ->
                   do error $ "Could not find schemaProperty named 'data'\n " <> show (ppSchema schema)
         (Just (Ref (Reference s))) ->
-          ([(textToPascalName s, [textToPascalName s])], var (textToPascalName s))
+          ([(fromString $ "Component." <> textToPascalName s, [textToPascalName s])], var (textToPascalName s))
 
 data PathTemplate
    = PathStatic Text
@@ -1310,7 +1342,7 @@ mkRequestDecl path method idName oper requiredParams =
       (patTys, urlE) = mkUrl idName pathTemplate
 --      (pats, typs) :: ([Pat'], [HsType'])
       requiredParamTypes   = map (var . snd . mkParamName Pascal) requiredParams
-      requiredParamImports = map (\p -> (fromString ((textToPascalName p)), [ snd $ mkParamName Pascal p])) requiredParams
+      requiredParamImports = map (\p -> (fromString ("Component." <> (textToPascalName p)), [ snd $ mkParamName Pascal p])) (requiredParams \\ webStripeTypesNames)
       requiredParamPats :: [Pat']
       requiredParamPats   = map (bvar . snd . mkParamName Camel) requiredParams
       requiredParamVars :: [HsExpr']
@@ -1412,9 +1444,9 @@ mkOperation modBaseName path method mIdName op =
           Nothing -> id
           (Just idName) -> (textToPascalName idName :)
           -- FIXME: this nub should really combine and nub all imports from the same module into a single import
-  in (Nothing, (requestDeclImports ++ returnImports ++ concat paramImports ++ nub (concat paramImportsOP), (requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls)), [] )) :
+  in (Nothing, (nub (sort (requestDeclImports ++ returnImports ++ concat paramImports ++ nub (concat paramImportsOP) )), (requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls)), [] )) :
      (map (\(mModBase, pathImports, instanceDecls, typeDecls) -> (mModBase, (pathImports, (concatMap snd $ InsOrd.toList typeDecls) ++ instanceDecls, []))) ownModDecls)
-                                                                            -- (fromJust mModBase, pathImports, instanceDecls, concatMap snd $ concatMap InsOrd.toList typeDecls))) ownModDecls)
+
 
 --  in [(modBaseName, (concat paramImports, (requestDecl ++ (opIdDecl:stripeReturnDecl:stripeHasParamDecls)),  {- addIdName ((map fst returnImports) ++ params ++ reexports), -} [] {- requestTypes FIMXE -}))]
 
@@ -1479,24 +1511,27 @@ lookupPaths hash ((p,_) : ps) =
     Nothing -> error $ "lookupPaths: could not find path " ++ p
 
 -- mkImport :: RdrNameStr -> IE'
-mkImport (n, things) =  import' (fromString $ "Web.Stripe.Component."  <> (rdrNameStrToString n)) `exposing` [ thingWith thing [] | thing <- things ]
+mkImport (n, things) =  import' (fromString $ "Web.Stripe."  <> (rdrNameStrToString n)) `exposing` [ thingWith thing [] | thing <- things ]
 
 mkOwnMods :: (Maybe (NonEmpty String), ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [RdrNameStr]) ) -> IO ()
 mkOwnMods (Just modBaseName, decls) =
   let (pathImports, opDecls, additionalExports) = decls
-  in  mkPathModule modBaseName pathImports opDecls additionalExports
+  in  mkPathModule modBaseName pathImports opDecls Nothing -- additionalExports
 
-mkPathModule modBaseName pathImports decls exports =
+mkPathModule :: NonEmpty String -> [(RdrNameStr, [RdrNameStr])] -> [HsDecl'] -> Maybe [RdrNameStr] -> IO ()
+mkPathModule modBaseName pathImports decls exports' =
   do let imports = [ import' "Control.Monad" `exposing` [ var "mzero" ]
                    , qualified' $ import'  "Data.Aeson"
                    , import' "Data.Aeson" `exposing` [ thingWith "FromJSON" [ "parseJSON" ]
                                                      , thingAll "ToJSON"
                                                      , thingWith "Value" [ "String", "Object", "Bool" ]
+                                                     , var "Object"
                                                      , var "(.:)"
                                                      , var "(.:?)"
                                                      -- , var "Object"
                                                      ]
-                   , import' "Data.Data" `exposing` [ var "Data" ]
+                   , import' "Data.Data" `exposing` [ var "Data", var "Typeable" ]
+                   , import' "Data.Map"   `exposing` [ var "Map" ]
                    , import' "Data.Time.Clock" `exposing` [ var "UTCTime" ]
                    , import' "Data.Text" `exposing` [ var "Text", var "unpack" ]
                    , import' "Data.Text.Encoding" `exposing` [ var "encodeUtf8" ]
@@ -1520,6 +1555,7 @@ mkPathModule modBaseName pathImports decls exports =
 --                        , thingAll "EndingBefore"
 --                        , thingAll "Limit"
                         , thingAll "NowOrLater"
+                        , var "ExpandsTo"
                         ]
                    , import' "Web.Stripe.OneOf" `exposing`
                       [ thingAll "OneOf"
@@ -1679,7 +1715,7 @@ mkFromJSON name s =
                               case properties of
                                 -- FIXME: the [] case probably happens when there are only additionalPropreties -- aka a dictionary of key/value pairs where th
                                 -- the additionlProperties are the key names
-                                [] -> (var "pure") @@ (var "undefined") --  (var $ textToPascalName name)  -- FIXME
+                                [] -> var "pure" @@ ((var $ textToPascalName name) @@ (var "o")) -- (var "pure") @@ (var "undefined") --  (var $ textToPascalName name)  -- FIXME
                                 _  -> op' (var $ textToPascalName name) "<$>" $ addAp $ map (mkJsonField name (_schemaRequired s)) $ properties
                                                     ]
                 , funBinds "parseJSON" [ match [wildP] (var "mzero") ]
@@ -1696,6 +1732,8 @@ addAp (a:rs) =  (op' a "<*>" (addAp rs))
 mkJsonField :: Text -> [Text] -> (Text, Referenced Schema) -> HsExpr'
 -- mkJsonField objName ("amount", (Inline s)) = par (op' (var "Amount") "<$>" (op (var "o") ".:"  (string "amount")))
 -- mkJsonField objName ("amount_refunded", (Inline s)) = par (op' (var "Amount") "<$>" (op (var "o") ".:"  (string "amount_refunded")))
+mkJsonField objName requiredFields ("object", (Inline s)) =
+  op (var "o") ".:" (string "object")
 mkJsonField objName requiredFields ("id", (Inline s))
   | not ("id" `elem` requiredFields) &&  (not $ null requiredFields) =
     par (op' (var "fmap" @@ (var (textToPascalName $ objName <> "_id"))) "<$>" (op (var "o") ".:?"  (string "id")))
@@ -1796,30 +1834,30 @@ breakCycle "Customer" "InvoiceSettingCustomerSetting" = True
 breakCycle "Customer" "Subscription" = True
 -- breakCycle "Charge" "PaymentSource" = True
 -}
-breakCycle _        "Product" = True
-breakCycle _        "ApiErrors" = True
+breakCycle _        "Component.Product" = True
+breakCycle _        "Component.ApiErrors" = True
 --breakCycle _        "PaymentSource" = True
-breakCycle _        "FileLink" = True
-breakCycle _        "ExternalAccount" = True
+breakCycle _        "Component.FileLink" = True
+breakCycle _        "Component.ExternalAccount" = True
 --breakCycle _        "PaymentMethod" = True
-breakCycle _        "TaxId" = True
-breakCycle _        "Discount" = True
-breakCycle _        "PaymentSource" = True
-breakCycle _        "InvoiceSettingCustomerSetting" = True
-breakCycle _        "Subscription" = True
-breakCycle _        "Charge" = True
-breakCycle _        "Transfer" = True
-breakCycle _        "TransferReversal" = True
-breakCycle _        "SetupAttempt" = True
-breakCycle _        "PaymentIntent" = True
-breakCycle _        "Account" = True
-breakCycle _        "ApplicationFee" = True
-breakCycle _        "Quote" = True
-breakCycle _        "BalanceTransaction" = True
-breakCycle _        "Invoice" = True
-breakCycle _        "IssuingTransaction" = True
-breakCycle _        "TreasuryTransaction" = True
-breakCycle _        "CustomerBalanceTransaction" = True
+breakCycle _        "Component.TaxId" = True
+breakCycle _        "Component.Discount" = True
+breakCycle _        "Component.PaymentSource" = True
+breakCycle _        "Component.InvoiceSettingCustomerSetting" = True
+breakCycle _        "Component.Subscription" = True
+breakCycle _        "Component.Charge" = True
+breakCycle _        "Component.Transfer" = True
+breakCycle _        "Component.TransferReversal" = True
+breakCycle _        "Component.SetupAttempt" = True
+breakCycle _        "Component.PaymentIntent" = True
+breakCycle _        "Component.Account" = True
+breakCycle _        "Component.ApplicationFee" = True
+breakCycle _        "Component.Quote" = True
+breakCycle _        "Component.BalanceTransaction" = True
+breakCycle _        "Component.Invoice" = True
+breakCycle _        "Component.IssuingTransaction" = True
+breakCycle _        "Component.TreasuryTransaction" = True
+breakCycle _        "Component.CustomerBalanceTransaction" = True
 -- breakCycle _        "BankAccount" = True
 
 
@@ -1858,6 +1896,7 @@ mkComponent component@(name, schema) =
            , import' "Data.Aeson" `exposing` [ thingWith "FromJSON" [ "parseJSON" ]
                                              , thingAll "ToJSON"
                                              , thingWith "Value" [ "String", "Object", "Bool" ]
+                                             , var "Object"
                                              , var "(.:)"
                                              , var "(.:?)"
 --                                             , var "Object"
@@ -1882,6 +1921,8 @@ mkComponent component@(name, schema) =
            , import' "Web.Stripe.Types" `exposing` [ thingAll "Expandable"
                                                    , thingAll "StripeList"
                                                    , thingAll "Lines"
+                                                   , thingWith "LineItems" []
+                                                   , thingWith "Metadata" []
                                                    , var "ExpandsTo"
                                                    , var "Amount"
                                                    , var "Currency"
@@ -1893,7 +1934,7 @@ mkComponent component@(name, schema) =
          exports = Nothing
          (objectImports', objectDecls, toStripeParamBuilder) = mkObject AllDeclarations component
          objectImports = map (\(n, things) -> sourceImport pname n $
-                               import' (fromString $ "Web.Stripe.Component."  <> (rdrNameStrToString n))
+                               import' (fromString $ "Web.Stripe." {- Component." -}  <> (rdrNameStrToString n))
                                     `exposing` [ thingWith thing [] | thing <- things ] ) (filter (\(n, _) -> (n /= (textToPascalName name))) objectImports')
          decls = (if name == "customer"
                    -- this is a hack. Not sure why GHC can not find the instance that already exists in PaymentSource
@@ -1932,6 +1973,7 @@ mkHsBoot component@(name, schema)
            , import' "Data.Aeson" `exposing` [ thingWith "FromJSON" [ "parseJSON" ]
                                              , thingAll "ToJSON"
                                              , thingWith "Value" [ "String", "Object", "Bool" ]
+                                             , var "Object"
                                              , var "(.:)"
                                              , var "(.:?)"
 --                                             , var "Object"
@@ -1978,7 +2020,70 @@ mkHsBoot component@(name, schema)
      T.writeFile ("_generated/src/Web/Stripe/Component/" <> pname <> ".hs-boot") formatted
      pure ()
 mkHsBoot component@(name, schema) = pure ()
+{-
+showAmount
+  :: Currency -- ^ `Currency`
+  -> Int      -- ^ `Amount`
+  -> String
+showAmount cur amt =
+  case cur of
+   USD -> "$" ++ show2places (currencyDivisor cur amt)
+   _   -> show2places (currencyDivisor cur amt) ++ " " ++ show cur
+  where
+    show2places v = showFFloat (Just 2) v ""
+-}
 
+{-
+------------------------------------------------------------------------------
+-- currency division funtion accounting for zero currencies
+--
+-- https:\/\/support.stripe.com\/questions\/which-zero-decimal-currencies-does-stripe-support
+currencyDivisor
+    :: Currency -- ^ `Currency`
+    -> (Int -> Float) -- ^ function to convert amount to a float
+currencyDivisor cur =
+  case cur of
+    BIF -> zeroCurrency
+    CLP -> zeroCurrency
+    DJF -> zeroCurrency
+    GNF -> zeroCurrency
+    JPY -> zeroCurrency
+    KMF -> zeroCurrency
+    KRW -> zeroCurrency
+    MGA -> zeroCurrency
+    PYG -> zeroCurrency
+    RWF -> zeroCurrency
+    VND -> zeroCurrency
+    VUV -> zeroCurrency
+    XAF -> zeroCurrency
+    XOF -> zeroCurrency
+    XPF -> zeroCurrency
+    EUR -> hundred
+    USD -> hundred
+    CHF -> hundred
+    _   -> error $ "please submit a patch to currencyDivisor for this currency: " ++ show cur
+  where
+    zeroCurrency = fromIntegral
+    hundred v    = fromRat $ fromIntegral v % (100 :: Integer)
+
+-}
+showAmount :: [HsDecl']
+showAmount =
+  [ typeSig "showAmount" $ var "Currency" --> var "Int" --> var "String"
+  , funBind "showAmount" $ matchGRHSs [ bvar "cur", bvar "amt" ] $
+      (rhs (case' (var "cur")
+        [ match [ conP "USD" [] ] ( op (string "$") "++" (var "show2places" @@ (var "currencyDivisor" @@ var "cur" @@ var "amt")))
+        , match [ wildP ] (op (var "show2places" @@ (var "currencyDivisor" @@ var "cur" @@ var "amt" )) "++" (op (string " ") "++" (var "show" @@ var "cur")))
+        ])  `where'`
+     [ funBind "show2places" $ match [ bvar "v" ] $ var "showFFloat" @@ (var "Just" @@ var "2") @@ (var "v") @@ (string "") ])
+  , typeSig "currencyDivisor" $ var "Currency" --> (var "Int" --> var "Float")
+  , funBind "currencyDivisor" $ matchGRHSs [ bvar "cur" ] $
+      (rhs (case' (var "cur")
+             [ -- match [ conP "BIF" [] ] (var "zeroCurrency")
+               match [ conP "USD" [] ] (var "hundred")
+             ]) `where'`
+        [ funBind "hundred" $ matchGRHSs [ bvar "v"] $ (rhs (op (var "fromRat") "$" (op (var "fromIntegral" @@ var "v") "%" (var "100")))) ])
+  ]
 -- create Web.Stripe.Types
 mkTypes :: OpenApi -> IO ()
 mkTypes oa =
@@ -1998,7 +2103,8 @@ mkTypes oa =
            , import' "Control.Monad" `exposing` [ var "mzero" ]
            , import' "Data.Aeson" `exposing` [ thingWith "FromJSON" [ "parseJSON" ]
                                              , thingAll "ToJSON"
-                                             , thingWith "Value" [ "String", "Object", "Bool" ]
+                                             , thingAll "Value" -- [ "String", "Object", "Bool" ]
+                                             , var "Object"
                                              , var "(.:)"
                                              , var "(.:?)"
 --                                             , var "Object"
@@ -2011,7 +2117,7 @@ mkTypes oa =
            , import' "Data.Ratio" `exposing` [ var "(%)" ]
            , import' "Data.Text"  `exposing` [ var "Text", var "unpack" ]
            , import' "Data.Time"  `exposing` [ var "UTCTime" ]
---           , import' "Numeric"  `exposing` [ var "fromRat" , var "showFFLoat" ]
+           , import' "Numeric"  `exposing` [ var "fromRat" , var "showFFloat" ]
            , import' "Text.Read"  `exposing` [ var "lexP", var "pfail" ]
            , qualified' $ import' "Text.Read" `as'` "R"
            , import' "Web.Stripe.OneOf" `exposing` [ thingAll "OneOf" ]
@@ -2020,11 +2126,15 @@ mkTypes oa =
          exports = Nothing
 -- charge         charge = (componentSchemaByName oa "charge")
          cs = _componentsSchemas (_openApiComponents oa)
-         decls = [ -- ExpandsTo
+         decls = [ standaloneDeriving (var "Ord" @@ var "Value")
+
+                 , -- ExpandsTo
                    typeFamily' OpenTypeFamily TopLevel "ExpandsTo" [bvar "id"] Prefix (KindSig NoExtField (hsStarTy False))
 --                 , tyFamInst "ExpandsTo" [var "AccountId"] (var "Account")
                  -- fixme -- fake types
                  , data' "LineItems" []  [ prefixCon "LineItems" [] ] derivingCommon
+                 , instance' (var "FromJSON" @@ var "LineItems")
+                      [ funBinds "parseJSON" [ match [ bvar "v" ] ( var "pure" @@ var "undefined" )] ]
 --                 , data' "FixMe4b" []  [ prefixCon "FixMe4b" [] ] derivingCommon
 --                 , data' "FixMe4bId" []  [ prefixCon "FixMe4bId" [] ] derivingCommon
 --                 , typeInstance' "ExpandsTo FixMe4bId"  hsOuterImplicit [] Prefix (var "FixMe4bId")
@@ -2122,6 +2232,10 @@ mkTypes oa =
                  , newtype' "StartingAfter" [ bvar "a" ] (recordCon "StartingAfter" [ ( fromString "getStartingAfter", field $ var "a") ])  derivingCommon
                  , newtype' "Limit" [ ] (recordCon "Limit" [ ( fromString "getLimit", field $ var "Int") ])  derivingCommon
                  , newtype' "Metadata" [ ] (recordCon "Metadata" [ ( fromString "unMetadata", field $ listTy $ tuple [ var "Text", var "Text" ])])  derivingCommon
+                 , instance' (var "FromJSON" @@ var "Metadata")
+                      [ funBinds "parseJSON" [ match [ bvar "v" ] (op (var "Metadata") "<$>" (var "parseJSON" @@ var "v") ) ]
+                      ]
+
                  , data' "NowOrLater" [] [ prefixCon "Now" []
                                          , prefixCon "Later" [ strict $ field $ var "UTCTime" ]
                                          ] derivingCommon
@@ -2190,7 +2304,7 @@ mkTypes oa =
                    -- emptyTimeRange
                  , typeSig "emptyTimeRange" $ var "TimeRange" @@ var "a"
                  , funBind "emptyTimeRange" $ match [] (var "TimeRange" @@ var "Nothing" @@ var "Nothing" @@ var "Nothing" @@ var "Nothing" )
-                 ] ++
+                 ] ++ showAmount ++
 --                 mkEnums (findEnums oa) ++
 --                 concatMap mkId (findIds oa) ++
 --                 concatMap mkObject (InsOrd.toList cs) ++
