@@ -157,6 +157,10 @@ instance ToStripeParam Metadata where
   toStripeParam (Metadata kvs) =
     (toMetaData kvs ++)
 
+instance ToStripeParam (Emptyable Metadata) where
+  toStripeParam Empty = (("metadata","") :)
+  toStripeParam (Full md) = toStripeParam md
+
 {-
 instance ToStripeParam AmountOff where
   toStripeParam (AmountOff i) =
