@@ -49,19 +49,19 @@ type family IsMember x ys where
   IsMember x ys = IsMember x ys
 
 data OneOf (n :: [Type]) where
-  Empty :: OneOf s
+  ONil :: OneOf s
   Val   :: e -> OneOf (e ': s)
   NoVal :: OneOf s -> OneOf (e ': s)
 
 deriving instance Typeable (OneOf (n :: [Type]))
 
 instance Show (OneOf '[]) where
-  show Empty = "{}"
+  show ONil = "{}"
 
 instance (Show e, Typeable e, Show (OneOf s)) => Show (OneOf (e ': s)) where
   show (Val e) = "(Val (" <> show e <> " :: " <> show (typeOf e) <> "))"
   show (NoVal o) = show o
-  show Empty  = "{}"
+  show ONil  = "{}"
 
 instance Read (OneOf a)
 instance (Typeable a) => Data (OneOf (a :: [Type]))
@@ -89,9 +89,9 @@ instance Ord (OneOf '[]) where
   compare _ _ = EQ
 
 instance (Ord e, Ord (OneOf s)) => Ord (OneOf (e ': s)) where
-  compare Empty Empty = EQ
-  compare Empty _ = LT
-  compare _ Empty = GT
+  compare ONil ONil = EQ
+  compare ONil _ = LT
+  compare _ ONil = GT
   compare (Val e1) (Val e2) = compare e1 e2
   compare (Val _) _ = LT
   compare _ (Val _) = GT
@@ -106,17 +106,17 @@ instance {-# OVERLAPS #-} Member e (e ': xs) where
   set e = Val e
   get (Val e) = Just e
   get (NoVal _) = Nothing
-  get Empty = error "impossible"
-  delete _ (Val _e) = Empty
+  get ONil = error "impossible"
+  delete _ (Val _e) = ONil
   delete _ (NoVal o) = o
-  delete _ Empty = Empty
+  delete _ ONil = ONil
 
 instance {-# OVERLAPS #-} (IsMember e (f:xs) ~ 'Found, Member e xs, DeleteList e (f:xs) ~ (f : DeleteList e xs)) => Member e (f ': xs) where
   set e = NoVal (set e)
   get (NoVal o) = get o
   get (Val _e) = Nothing
-  get Empty = error "impossible"
+  get ONil = error "impossible"
   delete _p (Val v) = (Val v) -- :: OneOf (f ': (DeleteList e xs))
   delete p (NoVal o) = NoVal (delete p o)
-  delete _p Empty = Empty
+  delete _p ONil = ONil
 
