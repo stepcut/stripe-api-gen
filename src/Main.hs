@@ -227,7 +227,7 @@ schemaToType gs objName n s =
 
 withPrefixEnumCon :: Text -> Text -> Text
 withPrefixEnumCon nm conName
-  | nm `elem` [ "active_features", "allowed_categories", "blocked_categories", "funding_instructions_bank_transfer_financial_address_type", "pending_features", "restricted_features", "supported_networks" ] =
+  | nm `elem` [ "active_features", "allowed_categories", "blocked_categories", "funding_instructions_bank_transfer_financial_address_type", "pending_features", "restricted_features", "supported_networks", "payment_method_types", "verification_method" ] =
       nm <> "_" <> conName
 withPrefixEnumCon nm conName
   | nm `elem` [ "allowed_countries"] =
@@ -311,7 +311,8 @@ schemaToEnumDecl instToStripeParam objNm nm s
                                                                                     case' (var "c") matches
                                                                                    ]))
                                                              ]
-                               ]
+                                  , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack $ withPrefixType nm) ]
+                                  ]
                               ]
                            _ -> []
                   toStripeParamBuilder =
@@ -431,7 +432,7 @@ schemaToType' :: GenStyle
 schemaToType' gs p n s
 --  | n == "type" = ([], var "StripeType", [])
    -- types imported from Web.Stripe.Types
-  | n `elem` webStripeTypesNames = ([], var $ textToPascalName n, [])
+--  | n `elem` webStripeTypesNames = ([], var $ textToPascalName n, [])
   | ((n == "type") && (_schemaType s == Just OpenApiString)) && (_schemaEnum s == Nothing)  = ([], var "Text", [])
   | n == "type" =  ([], var $ textToPascalName (p <> "_type"), [])
   | n == "status"  && (_schemaEnum s == Nothing) && (_schemaType s == Just OpenApiString) =  ([], var "Text", [])
@@ -859,7 +860,9 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                                   [ funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "txt" ] ]
                                                                ( var ":" @@ (tuple [string $ T.unpack tyName, var "encodeUtf8" @@ var "txt"
                                                                                    ]) )
-                                                             ] ]
+                                                             ]
+                                  , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack tyName) ]
+                                  ]
                           ]
                         _ -> []
               in ([], newtype' occName [] con (derivingCommon' gs) : inst, toStripeParamBuilder)
@@ -902,6 +905,7 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                                                                 , var "toBytestring" @@ (var "toSeconds" @@ var "utc")
                                                                 ]) )
                                           ]
+                                        , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack tyName) ] 
                                         ]
                                        ]
                in ([], (newtype' occName [] con (derivingCommon' gs) : inst), [])
@@ -1016,80 +1020,68 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
             --  error $ show er
 
   | (_schemaType s == Just OpenApiInteger) =
-      if wrapPrim
-      then let occName = fromString (textToPascalName $ tyName)
-               con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Integer" ) ]
-               inst = case instToStripeParam of
+      let toStripeParamBuilder =
+                    case instToStripeParam of
+                      HelperToStripeParam path ->
+                        let funName = T.concat (path ++ [tyName])
+                        in [( funName
+                            , funBind (fromString $ T.unpack funName)
+                               (match [ bvar "n" ] (list [(tuple [string $ T.unpack $ mkKey (path ++ [tyName]), var "toBytestring" @@ var "n"])]))
+                            )
+                           ]
+                      _ -> []
+      in
+       if wrapPrim
+       then let occName = fromString (textToPascalName $ tyName)
+                con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Integer" ) ]
+                inst = case instToStripeParam of
                         SkipToStripeParam -> []
                         TopToStripeParam ->
                           [ instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
                                   [ funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "n" ] ]
                                                                ( var ":" @@ (tuple [string $ T.unpack tyName, var "toBytestring" @@ var "n"
                                                                                    ]) )
-                                                             ] ]
+                                                             ]
+                                  , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack tyName) ]
+                                  ]
                           ]
                         _ -> []
-               toStripeParamBuilder =
-                    case instToStripeParam of
-                      HelperToStripeParam path ->
-                        let funName = T.concat (path ++ [tyName])
---                        in [(funName, valBind (fromString $ T.unpack funName) (var "id"))]
-                        in [( funName
-                            , funBind (fromString $ T.unpack funName)
---                               (match [conP (fromString (textToPascalName $ tyName)) [ bvar "n" ]] (var "id")))
-                               (match [ bvar "n" ] (list [(tuple [string $ T.unpack $ mkKey (path ++ [tyName]), var "toBytestring" @@ var "n"])]))
-                            )
-                           ]
-                      _ -> []
-           in ([], newtype' occName [] con (derivingCommon' gs) : inst, toStripeParamBuilder)
-      else let toStripeParamBuilder =
-                    case instToStripeParam of
-                      HelperToStripeParam path ->
-                        let funName = T.concat (path ++ [tyName])
---                        in [(funName, valBind (fromString $ T.unpack funName) (var "id"))]
-                        in [( funName
-                            , funBind (fromString $ T.unpack funName)
---                               (match [conP (fromString (textToPascalName $ tyName)) [ bvar "n" ]] (var "id")))
-                               (match [ bvar "n" ] (list [(tuple [string $ T.unpack $ mkKey (path ++ [tyName]), var "toBytestring" @@ var "n"])]))
-                            )
-                           ]
-                      _ -> []
-
-           in ([],[],toStripeParamBuilder)
+            in ([], newtype' occName [] con (derivingCommon' gs) : inst, toStripeParamBuilder)
+       else ([],[],toStripeParamBuilder)
 
   -- FIXME: should we use a Decimal type instead of Double?
   | (_schemaType s == Just OpenApiNumber) =
-      if wrapPrim
-      then let occName = fromString (textToPascalName $ tyName)
-               con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Double" ) ]
-               inst = case instToStripeParam of
-                        SkipToStripeParam -> []
-                        TopToStripeParam ->
-                               [ instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
-                                  [ funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "n" ] ]
+      let toStripeParamBuilder =
+                    case instToStripeParam of
+                      HelperToStripeParam path ->
+                        let funName = T.concat (path ++ [tyName])
+                        in [( funName
+                            , funBind (fromString $ T.unpack funName)
+                               (match [ bvar "n" ] (list [(tuple [string $ T.unpack $ mkKey (path ++ [tyName]), var "toBytestring" @@ var "n"])]))
+                            )
+                           ]
+                      _ -> []
+      in
+       if wrapPrim
+       then let occName = fromString (textToPascalName $ tyName)
+                con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Double" ) ]
+                inst = case instToStripeParam of
+                         SkipToStripeParam -> []
+                         TopToStripeParam ->
+                                [ instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
+                                   [ funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "n" ] ]
                                                                ( var ":" @@ (tuple [string $ T.unpack tyName, var "toBytestring" @@ var "n"
                                                                                    ]) )
-                                                             ] ]
-                               ]
-                        _ -> []
-           in ([], (newtype' occName [] con (derivingCommon' gs) : inst),[])
-      else ([],[],[])
+                                                             ]
+                                   , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack tyName) ]
+                                   ]
+                                ]
+                         _ -> []
+           in ([] , (newtype' occName [] con (derivingCommon' gs) : inst), toStripeParamBuilder )
+      else ([],[], toStripeParamBuilder)
 
   | (_schemaType s == Just OpenApiBoolean) =
-      if wrapPrim
-      then let occName = fromString (textToPascalName $ tyName)
-               con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Bool" ) ]
-               inst = case instToStripeParam of
-                        SkipToStripeParam -> []
-                        TopToStripeParam ->
-                               [ instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
-                                  [ funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "b" ] ]
-                                                               ( var ":" @@ (tuple [string $ T.unpack tyName, (if' (var "b") (string "true") (string "false"))
-                                                                      ]) )
-                                                             ] ]
-                               ]
-                        _ -> []
-               toStripeParamBuilder =
+     let toStripeParamBuilder =
                     case instToStripeParam of
                       HelperToStripeParam path ->
                         let funName = T.concat (path ++ [tyName])
@@ -1102,8 +1094,24 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                            ]
                       _ -> []
 
+      in if wrapPrim
+      then let occName = fromString (textToPascalName $ tyName)
+               con = recordCon occName [ (textToCamelName $ "un_" <> tyName, field $ var "Bool" ) ]
+               inst = case instToStripeParam of
+                        SkipToStripeParam -> []
+                        TopToStripeParam ->
+                               [ instance' ((var "ToStripeParam") @@ (var (textToPascalName tyName)))
+                                  [ funBinds "toStripeParam" [ match [ conP (fromString (textToPascalName $ tyName)) [ bvar "b" ] ]
+                                                               ( var ":" @@ (tuple [string $ T.unpack tyName, (if' (var "b") (string "true") (string "false"))
+                                                                      ]) )
+                                                             ]
+                                  , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack tyName) ]
+                                  ]
+                               ]
+                        _ -> []
+
            in ([], (newtype' occName [] con (derivingCommon' gs)) : inst, toStripeParamBuilder)
-      else ([],[],[])
+      else ([],[],toStripeParamBuilder)
 
   | _schemaType s == Just OpenApiArray =
       case _schemaItems s of
@@ -1141,6 +1149,7 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                                                                       ]) )
 -}
                                                              ]
+                                  , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack tyName) ]
                                   ]
                                ], [ (tyName, funBind "foo" (match [] (var "error \"builder goes here\"")) )])
                            HelperToStripeParam path -> if (tyName == "tiers") then error "do something here?" else ([],[])
@@ -1222,6 +1231,7 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                                                                ( var ":" @@ (tuple [string $ T.unpack tyName, (if' (var "b") (string "true") (string "false"))
                                                                       ]) )
                                                              ] -} ] -}
+                       , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack tyName) ]
                        ]
                      ]
                    _ -> []
@@ -1375,7 +1385,9 @@ mkStripeHasParamFromProperty modBaseName opName (pName, r@(Inline schema)) =
                                                                ( var ":" @@ (tuple [string $ T.unpack pName
                                                                                    , var "toBytestring" @@ (var "toSeconds" @@ var "t")
                                                                                    ]) )
-                                                             ] ]
+                                                             ]
+                           , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack pName) ]
+                           ]
                          ]
              in (Nothing , {- FIXME: this does not work because the module path is prepended. [(fromString "Web.Stripe.Types", [fromString "TimeRange"]) ] -} [], decls ++ insts, InsOrd.empty)
 
@@ -1730,6 +1742,7 @@ mkPathModule modBaseName pathImports decls exports' =
                       , FlexibleInstances
                       , MultiParamTypeClasses
                       , OverloadedStrings
+                      , OverlappingInstances
                       , StandaloneDeriving
                       , TypeFamilies
                       ]
@@ -1958,7 +1971,9 @@ mkId gs baseName =
                                                                ( var ":" @@ (tuple [string $ T.unpack baseName
                                                                                    , var "encodeUtf8" @@ var "t"
                                                                                    ]) )
-                                                             ] ]
+                                                             ]
+                      , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack n) ]
+                      ]
 
                   ] ++
                   [ standaloneDeriving (var cn @@ (var "Expandable" @@ (var $ fromString $ T.unpack n)) )  | cn <- derivingNames  ]
@@ -2255,6 +2270,7 @@ showAmount =
         [ funBind "hundred" $ matchGRHSs [ bvar "v"] $ (rhs (op (var "fromRat") "$" (op (var "fromIntegral" @@ var "v") "%" (var "100")))) ])
   ]
 -- create Web.Stripe.Types
+{-
 mkTypes :: OpenApi -> IO ()
 mkTypes oa =
   do let extensions = [ DataKinds
@@ -2518,7 +2534,7 @@ mkTypes oa =
                                   , var "Typeable"
                                   ]
                       ]
-
+-}
 showGhc a =
   runGhc (Just libdir) $
     do dflags <- getDynFlags
@@ -2690,11 +2706,12 @@ main =
      copyFile "static/src/Web/Stripe/StripeRequest.hs" "_generated/src/Web/Stripe/StripeRequest.hs"
      copyFile "static/src/Web/Stripe/OneOf.hs"         "_generated/src/Web/Stripe/OneOf.hs"
      copyFile "static/src/Web/Stripe/Util.hs"          "_generated/src/Web/Stripe/Util.hs"
+     copyFile "static/src/Web/Stripe/Types.hs"          "_generated/src/Web/Stripe/Types.hs"
      copyFile "static/stripe-core.cabal"               "_generated/stripe-core.cabal"
      copyFile "static/cabal.project"                   "_generated/cabal.project"
      copyFile "static/shell.nix"                       "_generated/shell.nix"
 
-     mkTypes oa
+--     mkTypes oa
      mkComponents oa
 
      -- Web.Stripe.Account

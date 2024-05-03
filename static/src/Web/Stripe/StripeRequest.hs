@@ -7,6 +7,7 @@
 {-# LANGUAGE TypeFamilies          #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE RecordWildCards       #-}
+{-# LANGUAGE ScopedTypeVariables       #-}
 -- |
 -- Module      : Web.Stripe.StripeRequest
 -- Copyright   : (c) David Johnson, 2014
@@ -31,6 +32,7 @@ module Web.Stripe.StripeRequest
 import           Control.Applicative ((<$>))
 import           Data.ByteString    (ByteString)
 import           Data.Monoid        ((<>))
+import           Data.Proxy         (Proxy(..))
 import           Data.String        (fromString)
 import           Data.Text          (Text)
 import qualified Data.Text.Encoding as Text
@@ -110,14 +112,18 @@ data StripeRequest a = StripeRequest
 -- | convert a parameter to a key/value
 class ToStripeParam param where
   toStripeParam :: param -> [(ByteString, ByteString)] -> [(ByteString, ByteString)]
+  toStripeParamName :: Proxy param -> ByteString
 
 instance ToStripeParam Currency where
   toStripeParam currency =
     (("currency", toBytestring currency) :)
+  toStripeParamName _ = "currency"
 
 instance ToStripeParam ExpandParams where
   toStripeParam (ExpandParams params) =
     (toExpandable params ++)
+  toStripeParamName _ = "expand_params"
+
 {-
 instance ToStripeParam ChargeId where
   toStripeParam (ChargeId cid) =
@@ -138,29 +144,39 @@ instance (ToStripeParam param) => ToStripeParam (StartingAfter param) where
     case toStripeParam param [] of
       [(_, p)] -> (("starting_after", p) :)
       _        -> error "StartingAfter applied to non-singleton"
+  toStripeParamName _ = "starting_after"
 
 instance (ToStripeParam param) => ToStripeParam (EndingBefore param) where
   toStripeParam (EndingBefore param) =
     case toStripeParam param [] of
       [(_, p)] -> (("ending_before", p) :)
       _        -> error "EndingBefore applied to non-singleton"
+  toStripeParamName _ = "ending_before"
 
 instance ToStripeParam Limit where
   toStripeParam (Limit i) =
     (("limit", toBytestring i) :)
+  toStripeParamName _ = "limit"
 
 instance ToStripeParam Amount where
   toStripeParam (Amount i) =
     (("amount", toBytestring i) :)
+  toStripeParamName _ = "amount"
 
 instance ToStripeParam Metadata where
   toStripeParam (Metadata kvs) =
     (toMetaData kvs ++)
+  toStripeParamName _ = "metadata"
 
+instance (ToStripeParam p) => ToStripeParam (Emptyable p) where
+  toStripeParamName _    = toStripeParamName (Proxy :: Proxy p)
+  toStripeParam Empty    = ((toStripeParamName (Proxy :: Proxy p),"") :)
+  toStripeParam (Full p) = toStripeParam p
+{-
 instance ToStripeParam (Emptyable Metadata) where
   toStripeParam Empty = (("metadata","") :)
   toStripeParam (Full md) = toStripeParam md
-
+-}
 {-
 instance ToStripeParam AmountOff where
   toStripeParam (AmountOff i) =
