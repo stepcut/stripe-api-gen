@@ -1198,10 +1198,13 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                   _          -> tyName
               _ -> -} tyName
           occName = fromString (textToPascalName name)
+          instToStripeParam' = case instToStripeParam of
+                                 (HelperToStripeParam path) -> (HelperToStripeParam (path ++ [name]))
+                                 _                          -> (HelperToStripeParam [name])
           (imports, fields, decls, toStripeParamBuilders') =
             -- NOTE: we only want to wrap primitive values that are going to be used directly as parameters to operation calls. So we don't need to wrap prims that appear
             -- as fields in a record
-            unzip4 $ map (schemaToField gs {- wrapPrim -} False (HelperToStripeParam [name]) (_schemaRequired s) name) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
+            unzip4 $ map (schemaToField gs {- wrapPrim -} False instToStripeParam' (_schemaRequired s) name) $ sortOn fst $ (InsOrd.toList (_schemaProperties s))
 
           inst = case instToStripeParam of
                    SkipToStripeParam -> []
@@ -1222,11 +1225,27 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                        ]
                      ]
                    _ -> []
-          con = recordCon occName fields
+          con  = recordCon occName fields
           json = mkFromJSON name s
 
+          toStripeParamBuilder =
+                    case instToStripeParam of
+                      HelperToStripeParam path ->
+--                        concat toStripeParamBuilders'
+                        let funName = T.concat (path ++ [tyName])
+                            varNms = [ (T.unpack tyName) ++ "_v" ++ show i | i <- [0 .. (length toStripeParamBuilders' - 1)]]
+                        in [( funName
+                            , funBind (fromString $ T.unpack funName)
+                               (match [ conP (fromString (textToPascalName tyName)) (map (bvar . fromString) varNms ) ]
+                                 (let' (map snd (concat toStripeParamBuilders')) $
+                                   ( (par (var "concat" @@ (list (map (\(f,v) -> (var (fromString $ T.unpack f) @@ (var $ fromString v))) (zip (map fst (concat toStripeParamBuilders')) varNms))))) ))
+                               )
+                            )
+                           ] 
+                      _ -> []
+
       in case gs of
-           AllDeclarations -> (concat imports, (data' occName [] [con] (derivingCommon' gs))  : (json : inst ++ concat decls), )
+           AllDeclarations -> (concat imports, (data' occName [] [con] (derivingCommon' gs))  : (json : inst ++ concat decls), toStripeParamBuilder)
            HsBoot -> ([]
                      , data' occName [] [] [] :
                        (instance' (var "FromJSON" @@ var (textToPascalName name)) []) :
