@@ -225,14 +225,28 @@ schemaToType gs objName n s =
     (Just True) -> (imports, var "Maybe" @@ ty, decls)
     _           -> (imports, ty, decls)
 
-withPrefixEnumCon :: Text -> Text -> Text
-withPrefixEnumCon nm conName
-  | nm `elem` [ "active_features", "allowed_categories", "blocked_categories", "funding_instructions_bank_transfer_financial_address_type", "pending_features", "restricted_features", "supported_networks", "payment_method_types", "verification_method" ] =
+withPrefixType :: Text -> Text -> Text
+withPrefixType objNm nm =
+  -- FIXME: failure_code is usually a subset of this list
+  -- https://stripe.com/docs/error-codes) for a list of codes).
+  -- failure_code varies from location to location
+
+  -- in AccountCapabilities should we just use plain old Status for everything instead of generating unique status types?
+  case (nm `elem` ["status", {- "setup_future_usage", "capture_method", -} "type", "mandate_options", "verification_method"]) of
+    True -> (objNm <> "_" <> nm)
+    _ -> nm
+
+withPrefixEnumCon :: Text -> Text -> Text -> Text
+withPrefixEnumCon objNm nm conName
+  | nm `elem` [ "active_features", "allowed_categories", "blocked_categories", "funding_instructions_bank_transfer_financial_address_type", "pending_features", "restricted_features", "supported_networks", "payment_method_types" ] =
       nm <> "_" <> conName
-withPrefixEnumCon nm conName
+withPrefixEnumCon objNm nm conName
+  | nm `elem` [ "verification_method" ] =
+      objNm <> "_" <> conName
+withPrefixEnumCon objNm nm conName
   | nm `elem` [ "allowed_countries"] =
       T.toUpper conName
-withPrefixEnumCon nm conName =
+withPrefixEnumCon objNm nm conName =
   case conName `elem` [ "active"
                       , "always"
                       , "auto"
@@ -268,16 +282,16 @@ schemaToEnumDecl :: MkToStripeParam
                  -> Text    -- ^ enum name
                  -> Schema  -- ^ enum schema
                  -> (HsType', [HsDecl'], [(Text, RawValBind)])
-schemaToEnumDecl instToStripeParam objNm nm s
+schemaToEnumDecl instToStripeParam objName nm s
   | nm == "object" = (var "FixMeSchemaToEnumDecl", [], [])
 --       (textToPascalName "stripe_object", [ data' (textToPascalName "stripe_object") [] [ prefixCon (textToPascalName ("object_" <> c)) [] | c <- Set.toList conNms ] (derivingCommon' AllDeclarations) ])
 
   | nm == "version" && isJust (_schemaEnum s) =
       let (Just vs) =  _schemaEnum s
           cons = [ prefixCon (textToPascalName $ "V" <> c) [] | (Aeson.String c) <- vs ]
-          occName  = (textToPascalName (objNm <> "_"<> nm))
-          occName' = (textToPascalName (objNm <> "_"<> nm))
-          json = mkFromJSON (objNm <> "_"<> nm) s
+          occName  = (textToPascalName (objName <> "_"<> nm))
+          occName' = (textToPascalName (objName <> "_"<> nm))
+          json = mkFromJSON objName (objName <> "_"<> nm) s
       in ((var occName ), [data' occName' [] cons derivingCommon, json], [])
   | _schemaType s == Just OpenApiString =
       case _schemaEnum s of
@@ -285,33 +299,24 @@ schemaToEnumDecl instToStripeParam objNm nm s
           | nm == "status" && ([ c | (Aeson.String c) <- vs'] ==  [ "active", "inactive", "pending" ]) ->
               (var "Status", [], [])
           | otherwise ->
-              let withPrefixType t =
-                -- FIXME: failure_code is usually a subset of this list
-                -- https://stripe.com/docs/error-codes) for a list of codes).
-                -- failure_code varies from location to location
-
-                -- in AccountCapabilities should we just use plain old Status for everything instead of generating unique status types?
-                    case (nm `elem` ["status", {- "setup_future_usage", "capture_method", -} "type"]) of
-                      True -> (objNm <> "_" <> t)
-                      _ -> t
-                  occNam = textToPascalName $ withPrefixType nm
+              let occNam = textToPascalName $ withPrefixType objName nm
                   vs = filter (/= (Aeson.String "")) vs'
                   mkEmptyable ty = if elem (Aeson.String "") vs' then var "Emptyable" @@ ty else ty
                   -- fixme: detect if there is an "" in the list of enums and, if so, make the type Emptyable
                   matches =
                     if isEmptyable s
-                    then [ match [ if (c == "") then (conP "Empty" []) else (conP "Full" [ bvar (textToPascalName $ withPrefixEnumCon nm c) ]) ] (string $ T.unpack (withPrefixEnumCon (withPrefixType nm) c)) | (Aeson.String c) <- vs' ]
-                    else [ match [ bvar (textToPascalName $ withPrefixEnumCon nm c) ] (string $ T.unpack (withPrefixEnumCon (withPrefixType nm) c)) | (Aeson.String c) <- vs ]
+                    then [ match [ if (c == "") then (conP "Empty" []) else (conP "Full" [ bvar (textToPascalName $ withPrefixEnumCon objName nm c) ]) ] (string $ T.unpack (withPrefixEnumCon objName nm c)) | (Aeson.String c) <- vs' ]
+                    else [ match [ bvar (textToPascalName $ withPrefixEnumCon objName nm c) ] (string $ T.unpack (withPrefixEnumCon objName nm c)) | (Aeson.String c) <- vs ]
                   inst = case instToStripeParam of
                            SkipToStripeParam -> []
                            TopToStripeParam ->
-                             [ instance' ((var "ToStripeParam") @@ (mkEmptyable (var (textToPascalName $ withPrefixType nm))))
+                             [ instance' ((var "ToStripeParam") @@ (mkEmptyable (var (textToPascalName $ withPrefixType objName nm))))
                                   [ funBinds "toStripeParam" [ match [ bvar "c" ]
-                                                               ( var ":" @@ (tuple [string $ T.unpack $ withPrefixType nm,
+                                                               ( var ":" @@ (tuple [string $ T.unpack $ withPrefixType objName nm,
                                                                                     case' (var "c") matches
                                                                                    ]))
                                                              ]
-                                  , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack $ withPrefixType nm) ]
+                                  , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack $ withPrefixType objName nm) ]
                                   ]
                               ]
                            _ -> []
@@ -319,21 +324,27 @@ schemaToEnumDecl instToStripeParam objNm nm s
                     case instToStripeParam of
                       HelperToStripeParam path ->
                         let funName = T.concat (path ++ [nm])
-                            matches = [ match [ bvar (textToPascalName $ withPrefixEnumCon nm c) ] (list [ tuple [ string $ T.unpack $ mkKey (path ++ [nm])
-                                                                                                          , string $ T.unpack (withPrefixEnumCon nm c)
-                                                                                                          ] ])
+                            matches = [ match [ bvar (textToPascalName $ withPrefixEnumCon objName nm c) ]
+                                        (list [ tuple [ string $ T.unpack $ mkKey (path ++ [nm])
+                                                      , string $ T.unpack (withPrefixEnumCon objName nm c)
+                                                      ]
+                                              ])
                                       | (Aeson.String c) <- vs ]
                         in [( funName
                             , funBind (fromString $ T.unpack funName)
---                               (match [conP (fromString (textToPascalName $ tyName)) [ bvar "n" ]] (var "id")))
---                               (match [ bvar "c" ] (case' (var "c") matches))
-                               (match [ bvar "c" ] (case' (var "c") matches))
-                            )
-                           ]
+                               (if isEmptyable s
+                                 then (match [ bvar "mc" ]
+                                       (case' (var "mc")
+                                            [ match [ conP "Empty" [] ] (list [ tuple [ string $ T.unpack $ mkKey (path ++ [nm]), string "" ] ] )
+                                            , match [ conP "Full" [ bvar "c" ] ] (case' (var "c") matches)
+                                            ]))
+                                 else (match [ bvar "c" ] (case' (var "c") matches))
+                               )
+                            )]
                       _ -> []
 
-                  cons   = [ prefixCon (textToPascalName $ withPrefixEnumCon (withPrefixType nm) c) [] | (Aeson.String c) <- vs ]
-                  json = mkFromJSON (withPrefixType nm) s
+                  cons   = [ prefixCon (textToPascalName $ withPrefixEnumCon objName nm c) [] | (Aeson.String c) <- vs ]
+                  json = mkFromJSON objName nm s
               in (mkEmptyable (var (fromString occNam)), (data' (fromString occNam) [] cons derivingCommon) : json : inst, toStripeParamBuilder)
         Nothing ->
           let typName = textToPascalName nm
@@ -358,8 +369,8 @@ schemaToEnumDecl instToStripeParam objNm nm s
                       HelperToStripeParam path ->
                         let funName = T.concat (path ++ [nm])
 {-
-                            matches = [ match [ bvar (textToPascalName $ withPrefixEnumCon nm c) ] (list [ tuple [ string $ T.unpack $ mkKey (path ++ [nm])
-                                                                                                          , string $ T.unpack (withPrefixEnumCon nm c)
+                            matches = [ match [ bvar (textToPascalName $ withPrefixEnumCon objNm nm c) ] (list [ tuple [ string $ T.unpack $ mkKey (path ++ [nm])
+                                                                                                          , string $ T.unpack (withPrefixEnumCon objNm nm c)
                                                                                                           ] ])
                                       ]
 -}
@@ -470,7 +481,7 @@ schemaToType' gs p n s
                -> ([], var $ "Status", []) -- schemaToEnumDecl p n s
 -}
              (Just enums) ->
-               ([], (var $ textToPascalName n), [] {- mkEnums gs n (Map.singleton n (Set.fromList [ s | Aeson.String s <- enums ] ))-} )
+               ([], (var $ textToPascalName (withPrefixType p n)), [] {- mkEnums gs n (Map.singleton n (Set.fromList [ s | Aeson.String s <- enums ] ))-} )
 {-
                [ data' (textToPascalName typeNm) [] [ mkCon typeNm c | c <- Set.toList conNms ] derivingCommon
                , instance' (var "FromJSON" @@ (var $ textToPascalName typeNm)) [ funBinds "parseJSON" [ match []  (var "undefined")] ]
@@ -518,7 +529,7 @@ schemaToType' gs p n s
 {- case _schemaTitle s of
                     (Just t) -> t
                     Nothing  ->  n -}
-              in (imports, var (fromString $ textToPascalName nm), decls)
+              in (imports, var (fromString $ textToPascalName (withPrefixType p nm)), decls)
     -- FIXME: for things that are parameters, instead of OneOf couldn't we just use multiple StripeHasParam instances
   | isJust (_schemaAnyOf s) =
       case _schemaAnyOf s of
@@ -617,6 +628,7 @@ schemaToField gs wrapPrim instStripeParam required objectName (n, Inline s)
       , mkId gs objectName
       , []
       )
+{-
   | _schemaType s == Just OpenApiInteger && (n `elem` ["amount", "amount_captured", "amount_refunded", "application_fee_amount"]) =
       let ty = if ((Just True == _schemaNullable s) || ((not $ null required)  && (not $ n `elem` required)))
                then var "Maybe" @@ var "Amount"
@@ -626,6 +638,7 @@ schemaToField gs wrapPrim instStripeParam required objectName (n, Inline s)
          , []
          , []
          )
+-}
 -- schemaToField _ (n , Ref _)   = ((textToOccName n, strict $ field $ var "FixMe3"), [])
 schemaToField gs wrapPrim instStripeParam required objectName (n , Ref (Reference r))   =
   ( [(fromString $ "Component." <> textToPascalName r, [textToPascalName r])]
@@ -801,7 +814,19 @@ schemaToTypeDecls :: GenStyle -> Bool -> MkToStripeParam -> Text -> Text -> Sche
                   -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [(Text, RawValBind)])
 schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
   -- types which are manually defined in Types
-  | tyName `elem` webStripeTypesNames = ([],[],[])
+  | tyName `elem` webStripeTypesNames =
+      let toStripeParamBuilder =
+            case instToStripeParam of
+              HelperToStripeParam path ->
+                let funName = T.concat (path ++ [tyName])
+                in [( funName
+                    , funBind (fromString $ T.unpack funName)
+                       (match [ bvar "t" ] (list [(tuple [ string $ T.unpack $ mkKey (path ++ [tyName])
+                                                         , var "error" @@ string "add support for metadata in toStripeParam"
+                                                         ])
+                                                 ]))
+                    )]
+            in ([],[], toStripeParamBuilder)
   {-
   | tyName `elem` [ {- "Created", "Limit" , "EndingBefore", "StartingAfter" -} ] = ([], [], [])
   | tyName `elem` [ "object" ] = ([],[],[])
@@ -848,7 +873,8 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                                (match [ bvar "txt" ] (list [(tuple [string $ T.unpack $ mkKey (path ++ [tyName]), var "encodeUtf8" @@ var "txt" ])]))
                             )
                            ]
-                      _ -> error "do something here."
+                      TopToStripeParam  -> []
+                      SkipToStripeParam -> []
 
       in if wrapPrim -- FIXME actually wrap the prim?
          then let occName = fromString (textToPascalName $ tyName)
@@ -905,7 +931,7 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                                                                 , var "toBytestring" @@ (var "toSeconds" @@ var "utc")
                                                                 ]) )
                                           ]
-                                        , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack tyName) ] 
+                                        , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack tyName) ]
                                         ]
                                        ]
                in ([], (newtype' occName [] con (derivingCommon' gs) : inst), [])
@@ -915,7 +941,22 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
               case _schemaAnyOf s of
                 (Just [Inline schema1, Inline schema2])
                   | isEmptyEnum schema2 ->
-                      schemaToTypeDecls gs wrapPrim instToStripeParam "NoObjectName" tyName schema1
+                    let (imports, decls, builders) = schemaToTypeDecls gs wrapPrim instToStripeParam "NoObjectName" tyName schema1
+                    in case builders of
+                         [] -> (imports, decls, []) -- should this ever be []? Or does this mean we have not handled all the cases yet? 
+                         [(n, b)] ->
+                           case instToStripeParam of
+                             (HelperToStripeParam path) ->
+                               let funNameE = n <> "_emptyable"
+                                   emptyBuilder =
+                                           funBinds (fromString $ T.unpack funNameE)
+                                            [ match [ conP "Empty" []] (list [ tuple [ string $ T.unpack $ mkKey (path ++ [tyName]), string "" ] ] )
+                                            , match [ conP "Full" [ bvar "ec" ] ]
+                                              ( let' [b] (var (fromString $ T.unpack n) @@ var "ec"))
+                                            ]
+
+                               in (imports, decls, [(funNameE, emptyBuilder)])
+                             _ -> (imports, decls, [(n,b)]) -- [] -- error $ show (map fst builders)
                 -- if the AnyOf only contains a single item, why bother wrapping it up?
                 (Just [Ref schema1]) ->
                   ([],[],[])
@@ -988,13 +1029,13 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                                                   []
                                                ]
                                              (HelperToStripeParam path) ->
-                                               [ 
+                                               [
                                                ]
 
 
                       dataDecls =
                         if gs == AllDeclarations
-                        then  data' occName [] cons derivingCommon : mkFromJSON tyName s :
+                        then  data' occName [] cons derivingCommon : mkFromJSON objName tyName s :
                               typeInstance' ("ExpandsTo "<> T.unpack (textToPascalName (tyName <> "_id"))) hsOuterImplicit [] Prefix (var $ fromString $ T.unpack $ textToPascalName tyName) :
                               toStripeParam ++ instances
                               -- the are things that are anyOf things which are ids. We should probably detect this pattern, but it is rare enough that this list works for now.
@@ -1013,7 +1054,7 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                   unConName = fromString ("un" <> textToPascalName tyName)
                   cons = [ recordCon conName [ (unConName, strict $ field $ (var "OneOf" @@ listPromotedTy types)) ]
                          ]
-              in (data' occName [] cons derivingCommon : mkFromJSON objName s : [] {- :  concat decls -} )
+              in (data' occName [] cons derivingCommon : mkFromJSON objNm objName s : [] {- :  concat decls -} )
 -}
             (Just er) ->
               ([], [], [])
@@ -1137,7 +1178,7 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                             OpenApiString -> "Text"
                           con = recordCon occName [(fromString $ "un" <> textToPascalName tyName, field $ listTy $ var primTy)]
                           ty = newtype' occName [] con (derivingCommon' gs)
-                          json_o = mkFromJSON tyName s
+                          json_o = mkFromJSON objName tyName s
                           (inst, builder) = case instToStripeParam of
                            SkipToStripeParam -> ([],[])
                            TopToStripeParam ->
@@ -1152,12 +1193,33 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                                   , funBinds "toStripeParamName" [ match [ wildP ] (string $ T.unpack tyName) ]
                                   ]
                                ], [ (tyName, funBind "foo" (match [] (var "error \"builder goes here\"")) )])
-                           HelperToStripeParam path -> if (tyName == "tiers") then error "do something here?" else ([],[])
+                           HelperToStripeParam path ->  -- if (tyName == "tiers") then error "do something here?" else ([],[])
+                               let funName = T.concat (path ++ [tyName])
+                                   builder' =
+                                     [( funName
+                                      , funBind (fromString $ T.unpack funName)
+                                        (match [ bvar "txts" ]
+                                         (let'  [funBind "mkTxt" (match [ bvar "txt" ] (tuple [string $ T.unpack $ mkKey (path ++ [tyName]) <> "[]", var "encodeUtf8" @@ var "txt" ]))]
+                                         (var "map" @@ var "mkTxt" @@ var "txts")))
+                                         -- (list [(tuple [string $ T.unpack $ mkKey (path ++ [tyName]), var "encodeUtf8" @@ var "txt" ])]))
+                                      )
+                                     ]
+                               in ([], builder')
 
                       in ([], (ty : json_o : inst), builder) -- : concat decls
                 (Just _) ->
-                  let (ty_, decls, binds) = schemaToEnumDecl instToStripeParam objName tyName si
-                  in ([], decls, binds)
+                  let (ty_, decls, toStripeBuilderParamOne) = schemaToEnumDecl instToStripeParam objName tyName si
+                      toStripeParamBuilderList =
+                        case toStripeBuilderParamOne of
+                          [one@(funName', builder')] ->
+                            [ ( funName' <> "_list"
+                              , funBind (fromString (T.unpack (funName'<>"_list")))
+                                (match [ bvar "vs" ]
+                                 (let' [builder']
+                                   (var "concat" @@ (var "map" @@ var (fromString $ T.unpack funName') @@ var "vs")))
+                                )
+                              )]
+                  in ([], decls, toStripeParamBuilderList)
 
         Just (OpenApiItemsObject (Inline s)) ->
           trace (T.unpack $ "We should probably actually do something here. inline - " <> tyName {- <> (show (ppSchema s)) -}) $
@@ -1189,13 +1251,23 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                  ([], [], [])
 
     -- sometimes a property value is an Object, but the object has no predefined properties, so it is just a dictionary of key/value pairs.
+    -- for example Konbini in SubscriptionsPost.PaymentSettings
   | (_schemaType s == Just OpenApiObject) && (null (_schemaProperties s)) =
       let occName   = fromString (textToPascalName tyName)
           conName   = fromString (textToPascalName tyName)
           unConName = fromString ("un" <> textToPascalName tyName)
           con       = recordCon occName [ ( unConName, field $ var "Object") ]
-          json      = mkFromJSON tyName s
-      in ([], [ newtype' occName [] con [ deriving' [ var "Eq", var "Data", var "Ord", var "Read", var "Show" ]] , json ], [])
+          json      = mkFromJSON objName tyName s
+          toStripeParamBuilder =
+                    case instToStripeParam of
+                      HelperToStripeParam path ->
+                        let funName = T.concat (path ++ [tyName])
+                        in [( funName
+                            , funBind (fromString $ T.unpack funName)
+                                (match [ bvar "object" ] ( var "error" @@ string "toStripBuilder not unimplemented for Object yet." )
+                                )
+                            )]
+      in ([], [ newtype' occName [] con [ deriving' [ var "Eq", var "Data", var "Ord", var "Read", var "Show" ]] , json ], toStripeParamBuilder)
 
     -- the assumption here is that we are generating a record for an object?
   | otherwise =
@@ -1205,7 +1277,7 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                 case objName of
                   "shipping" -> "shipping_address"
                   _          -> tyName
-              _ -> -} tyName
+              _ -> -} withPrefixType objName tyName
           occName = fromString (textToPascalName name)
           instToStripeParam' = case instToStripeParam of
                                  (HelperToStripeParam path) -> (HelperToStripeParam (path ++ [name]))
@@ -1236,7 +1308,7 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                      ]
                    _ -> []
           con  = recordCon occName fields
-          json = mkFromJSON name s
+          json = mkFromJSON objName name s
 
           toStripeParamBuilder =
                     case instToStripeParam of
@@ -1244,14 +1316,24 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
 --                        concat toStripeParamBuilders'
                         let funName = T.concat (path ++ [tyName])
                             varNms = [ (T.unpack tyName) ++ "_v" ++ show i | i <- [0 .. (length toStripeParamBuilders' - 1)]]
-                        in [( funName
-                            , funBind (fromString $ T.unpack funName)
-                               (match [ conP (fromString (textToPascalName tyName)) (map (bvar . fromString) varNms ) ]
+                            matchc = (match [ conP (fromString (textToPascalName (withPrefixType objName tyName))) (map (bvar . fromString) varNms ) ]
                                  (let' (map snd (concat toStripeParamBuilders')) $
                                    ( (par (var "concat" @@ (list (map (\(f,v) -> (var (fromString $ T.unpack f) @@ (var $ fromString v))) (zip (map fst (concat toStripeParamBuilders')) varNms))))) ))
                                )
+                        in [( funName
+                            , funBind (fromString $ T.unpack funName)
+                               (if isEmptyable s
+                                 then (match [ bvar "mc" ]
+                                        (case' (var "mc")
+                                         [ match [ conP "Empty" [] ] (list [ tuple [ string $ T.unpack $ mkKey (path ++ [tyName]), string "" ] ] )
+                                         , match [ conP "Full" [ bvar "c"] ] (case' (var "c") [ matchc ])
+                                         ]
+                                        )
+                                      )
+                                 else matchc
+                               )
                             )
-                           ] 
+                           ]
                       _ -> []
 
       in case gs of
@@ -1712,7 +1794,8 @@ mkPathModule modBaseName pathImports decls exports' =
                        , var "mkStripeRequest"
                        ]
                    , import' "Web.Stripe.Types" `exposing`
-                        [ thingWith "Currency" []
+                        [ -- thingAll "Amount"
+                          thingWith "Currency" []
 --                        , thingAll "Created"
                         , thingAll "TimeRange"
                         , thingAll "Emptyable"
@@ -1839,19 +1922,12 @@ needsMkJSON s =
     Nothing -> True
     (Just ts) -> not $ ts `elem` [ OpenApiBoolean, OpenApiInteger, OpenApiNumber, OpenApiString  ]
 
-mkFromJSON :: Text -> Schema -> HsDecl'
-mkFromJSON name s =
+mkFromJSON :: Text -> Text -> Schema -> HsDecl'
+mkFromJSON objName name s =
   -- the the schema an AnyOf?
   case _schemaAnyOf s of
     (Just schemas) ->
       instance' (var "FromJSON" @@ (var $ textToPascalName name))
-      {-
-         [ funBinds "parseJSON" [ match [bvar "(Data.Aeson.Object o)"] $
-                              case properties of
-                                [] -> (var "pure") @@ (var "undefined") --  (var $ textToPascalName name)  -- FIXME
-                                _  -> op' (var $ textToPascalName name) "<$>" $ addAp $ map (mkJsonField name) $ properties
-                                                    ]
--}
          [ funBinds "parseJSON" [ match [wildP] (var "error" @@ (op (string "fromJSON = ") "++" (string $ T.unpack name))) ]
          ]
     Nothing ->
@@ -1861,7 +1937,7 @@ mkFromJSON name s =
           let mkConName :: (IsString a) => Text -> a
               mkConName c
                 | T.isSuffixOf "version" name  = textToPascalName ("V" <> c) -- maybe instead of looking at the type suffix, which should look if the constructor starts with a number
-                | otherwise         = textToPascalName (withPrefixEnumCon name c)
+                | otherwise         = textToPascalName (withPrefixEnumCon objName name c)
               mkEmptyable ty = if elem (Aeson.String "") vs then var "Emptyable" @@ ty else ty
               mkMatch v
                 | isEmptyable s =
@@ -1873,7 +1949,7 @@ mkFromJSON name s =
 
 
           in
-          instance' (var "FromJSON" @@ (mkEmptyable (var $ textToPascalName name)))
+          instance' (var "FromJSON" @@ (mkEmptyable (var $ textToPascalName (withPrefixType objName name))))
              [ funBinds "parseJSON" [ match [conP "String" [bvar "c"]] $
                                               case' (var "c")
                                                 ([ mkMatch v | (Aeson.String v) <- vs ] ++

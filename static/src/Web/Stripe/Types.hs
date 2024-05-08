@@ -34,7 +34,7 @@ import qualified Text.Read as R
 import Web.Stripe.OneOf (OneOf (..))
 import Web.Stripe.Util (fromSeconds)
 
-deriving instance Ord Value
+-- deriving instance Ord Value
 
 type family ExpandsTo id :: *
 
@@ -197,6 +197,10 @@ data Emptyable a
   = Full !a
   | Empty
   deriving (Eq, Data, Ord, Read, Show)
+
+instance (FromJSON a) => FromJSON (Emptyable a) where
+  parseJSON (String s) | s == "" = pure Empty
+  parseJSON v = Full <$> parseJSON v
 
 data Status
   = Active
