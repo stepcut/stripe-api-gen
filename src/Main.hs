@@ -2007,7 +2007,11 @@ mkJsonField _ requiredFields (fieldName, (Inline s)) =
            | otherwise -> (string $ T.unpack fieldName)
     in op' (var "o") oper val
 mkJsonField _ requiredFields (fieldName, (Ref r)) =
-  op (var "o") ".:"  (string $ T.unpack fieldName)
+  let oper = if ((not $ null requiredFields)  && (not $ fieldName `elem` requiredFields))
+             then ".:?"
+             else ".:"
+  in
+        op (var "o") oper (string $ T.unpack fieldName)
 
 
 -- create newtype, FromJSON and ExpandsTo for an id wrapped in a newtype
