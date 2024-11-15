@@ -34,17 +34,17 @@ import qualified Text.Read as R
 import Web.Stripe.OneOf (OneOf (..))
 import Web.Stripe.Util (fromSeconds)
 
--- deriving instance Ord Value
+deriving instance Ord Value
 
 type family ExpandsTo id :: *
-
+{-
 data LineItems
   = LineItems
   deriving (Eq, Data, Ord, Read, Show)
 
 instance FromJSON LineItems where
   parseJSON v = pure undefined
-
+-}
 data UseStripeSdk
   = UseStripeSdk
   deriving (Eq, Data, Ord, Read, Show)

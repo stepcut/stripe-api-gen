@@ -18,7 +18,6 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isUpper)
 import Data.Function (on)
-import Data.List ((\\), partition)
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Set (Set)
@@ -28,7 +27,7 @@ import Data.HashMap.Strict.InsOrd (InsOrdHashMap)
 import Data.Maybe (catMaybes, fromJust, isJust, isNothing, fromMaybe)
 import Data.OpenApi hiding (trace)
 import Data.String (IsString(fromString))
-import Data.List (nub, nubBy, sortOn, sort)
+import Data.List ((\\), partition, nub, nubBy, sortOn, sort)
 import  Data.List.NonEmpty (NonEmpty((:|)))
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Text (Text)
@@ -173,6 +172,9 @@ replace orig new = map (\c -> if (c == orig) then new  else c)
 
 textToPascalName :: (IsString a) => Text -> a
 -- textToPascalName "ID" = fromString "ID" -- FIXME: we want all country codes to be uppercase, but we don't have enough context here
+textToPascalName t | t == "source.mandate_notification" = "Source_MandateNotification"
+textToPascalName t | t == "billing.alert.triggered" = "Billing_Alert_Triggered"
+-- textToPascalName t | t == "issuing.authorization" = "Issuing_Authorization"
 textToPascalName t = fromString . pascal . (replace '.' '_') . T.unpack $ t
 
 textToCamelName :: (IsString a) => Text -> a
@@ -209,7 +211,7 @@ data MkToStripeParam
   deriving (Eq, Ord, Read, Show)
 
 -- types defined in Web.Stripe.Types
-webStripeTypesNames = [ "expand", "lines", "line_items", "metadata", "object", "use_stripe_sdk", "currency" ]
+webStripeTypesNames = [ "expand", "lines", {- "line_items",-} "metadata", "object", "use_stripe_sdk", "currency" ]
 
 -- the `[HsDecl']`in the return value should probably be removed. This
 -- should probably return the name of something that should already
@@ -249,6 +251,7 @@ withPrefixEnumCon objNm nm conName
 withPrefixEnumCon objNm nm conName =
   case conName `elem` [ "active"
                       , "always"
+                      , "application"
                       , "auto"
                       , "automatic"
                       , "credit_reversal"
@@ -272,6 +275,24 @@ withPrefixEnumCon objNm nm conName =
                       , "manual"
                       , "none"
                       , "other"
+                      , "enabled"
+                      , "disabled"
+                      , "on"
+                      , "off"
+                      , "never"
+                      , "if_available"
+                      , "balances"
+                      , "transactions"
+                      , "ownership"
+                      , "unsupported"
+                      , "required"
+                      , "optional"
+                      , "geographic_location"
+                      , "inappropriate"
+                      , "network_name"
+                      , "non_fiat_currency"
+                      , "other_entity"
+                      , "promotional_material"
                       ] of
     True -> (nm <> "_" <> conName)
     _    -> conName
@@ -292,6 +313,13 @@ schemaToEnumDecl instToStripeParam objName nm s
           occName  = (textToPascalName (objName <> "_"<> nm))
           occName' = (textToPascalName (objName <> "_"<> nm))
           json = mkFromJSON objName (objName <> "_"<> nm) s
+      in ((var occName ), [data' occName' [] cons derivingCommon, json], [])
+  | nm == "electronic_commerce_indicator" && isJust (_schemaEnum s) =
+      let (Just vs) =  _schemaEnum s
+          cons = [ prefixCon (textToPascalName $ "e_c_i_" <> c) [] | (Aeson.String c) <- vs ]
+          occName  = (textToPascalName nm)
+          occName' = (textToPascalName nm)
+          json = mkFromJSON objName nm s
       in ((var occName ), [data' occName' [] cons derivingCommon, json], [])
   | _schemaType s == Just OpenApiString =
       case _schemaEnum s of
@@ -446,8 +474,9 @@ schemaToType' gs p n s
 --  | n `elem` webStripeTypesNames = ([], var $ textToPascalName n, [])
   | ((n == "type") && (_schemaType s == Just OpenApiString)) && (_schemaEnum s == Nothing)  = ([], var "Text", [])
   | n == "type" =  ([], var $ textToPascalName (p <> "_type"), [])
-  | n == "status"  && (_schemaEnum s == Nothing) && (_schemaType s == Just OpenApiString) =  ([], var "Text", [])
-  | n == "status"  && ([ c | (Aeson.String c) <- (fromJust $ _schemaEnum s)] ==  [ "active", "inactive", "pending" ]) =  ([], var $ textToPascalName "status", [])
+  | n == "status"  && (_schemaType s == Just OpenApiString) && (_schemaEnum s == Nothing)  =  ([], var "Text", [])
+  | n == "status"  && (_schemaType s == Just OpenApiInteger) && (_schemaEnum s == Nothing)  =  ([], var "Int", []) -- currently just for the HTTP response code in forwarded_response_details
+  | n == "status"  && (_schemaType s == Just OpenApiString) && ([ c | (Aeson.String c) <- (fromJust $ _schemaEnum s)] ==  [ "active", "inactive", "pending" ]) =  ([], var $ textToPascalName "status", [])
   | n == "status" =  ([], var $ textToPascalName (p <> "_status"), [])
   | n == "version" && isJust (_schemaEnum s) = ([],  var $ textToPascalName (p <> "_version"), [])
 
@@ -667,6 +696,7 @@ schemaToField gs wrapPrim instStripeParam required objectName (n, Inline s)
        , toStripeBuilder
        )
 schemaToField gs wrapPrim instStripeParam required objectName (n, Inline s) =
+--  (if (n == "status") then (trace (show (objectName,s ))) else id) $
    let (imports, ty, _decls) = schemaToType gs objectName n s
        (imports', decls, toStripeParamBuilder) = schemaToTypeDecls gs wrapPrim instStripeParam objectName n s
    in -- if (objectName == "tiers" && n == "flat_amount") then error (show $ (map fst toStripeParamBuilder, wrapPrim, objectName, n, ppSchema s)) else
@@ -806,6 +836,14 @@ referencedSchemaToTypeDecls gs wrapPrim instToStripeParam objName tyName  (Ref (
   in (imports, (var $ textToPascalName r), [])
 -}
 
+
+statusIsActiveInactivePending :: Schema -> Bool
+statusIsActiveInactivePending s =
+  if (_schemaType s == Just OpenApiString)
+  then case _schemaEnum s of
+         (Just vs') -> ([ c | (Aeson.String c) <- vs'] ==  [ "active", "inactive", "pending" ])
+         _ -> False
+  else False
 {-
 FIXME: wrapPrim is used because stripe params need to have unique type names. So values that will be used as params need wrappers.
 However this code seems to only provide stripeParamBuilders for wrapped values -- which is probably not right. When we have a record with a bunch of fields, schemaToField needs builders for each field, but the fields that have primitive values don't need to be wrapped. Though perhaps schemaToField can just ignore the newtypes if it does not need them?
@@ -814,6 +852,7 @@ schemaToTypeDecls :: GenStyle -> Bool -> MkToStripeParam -> Text -> Text -> Sche
                   -> ([(RdrNameStr, [RdrNameStr])], [HsDecl'], [(Text, RawValBind)])
 schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
   -- types which are manually defined in Types
+  -- sometimes 'status' is not the expected Active, Inactive, Pending. This filter should be more better.
   | tyName `elem` webStripeTypesNames =
       let toStripeParamBuilder =
             case instToStripeParam of
@@ -827,6 +866,7 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                                                  ]))
                     )]
             in ([],[], toStripeParamBuilder)
+
   {-
   | tyName `elem` [ {- "Created", "Limit" , "EndingBefore", "StartingAfter" -} ] = ([], [], [])
   | tyName `elem` [ "object" ] = ([],[],[])
@@ -1267,6 +1307,7 @@ schemaToTypeDecls gs wrapPrim instToStripeParam objName tyName s
                                 (match [ bvar "object" ] ( var "error" @@ string "toStripBuilder not unimplemented for Object yet." )
                                 )
                             )]
+                      itsp -> error $ show (tyName, s, itsp)
       in ([], [ newtype' occName [] con [ deriving' [ var "Eq", var "Data", var "Ord", var "Read", var "Show" ]] , json ], toStripeParamBuilder)
 
     -- the assumption here is that we are generating a record for an object?
@@ -1773,7 +1814,7 @@ mkPathModule modBaseName pathImports decls exports' =
                    , qualified' $ import'  "Data.Aeson"
                    , import' "Data.Aeson" `exposing` [ thingWith "FromJSON" [ "parseJSON" ]
                                                      , thingAll "ToJSON"
-                                                     , thingWith "Value" [ "String", "Object", "Bool" ]
+--                                                     , thingWith "Value" [ "String", "Object", "Bool" ]
                                                      , var "Object"
                                                      , var "(.:)"
                                                      , var "(.:?)"
@@ -1937,6 +1978,7 @@ mkFromJSON objName name s =
           let mkConName :: (IsString a) => Text -> a
               mkConName c
                 | T.isSuffixOf "version" name  = textToPascalName ("V" <> c) -- maybe instead of looking at the type suffix, which should look if the constructor starts with a number
+                | T.isSuffixOf "electronic_commerce_indicator" name  = (textToPascalName $ "e_c_i_" <> c) -- maybe instead of looking at the type suffix, which should look if the constructor starts with a number
                 | otherwise         = textToPascalName (withPrefixEnumCon objName name c)
               mkEmptyable ty = if elem (Aeson.String "") vs then var "Emptyable" @@ ty else ty
               mkMatch v
@@ -1950,7 +1992,7 @@ mkFromJSON objName name s =
 
           in
           instance' (var "FromJSON" @@ (mkEmptyable (var $ textToPascalName (withPrefixType objName name))))
-             [ funBinds "parseJSON" [ match [conP "String" [bvar "c"]] $
+             [ funBinds "parseJSON" [ match [conP "Aeson.String" [bvar "c"]] $
                                               case' (var "c")
                                                 ([ mkMatch v | (Aeson.String v) <- vs ] ++
                                                  [ match [ bvar "s" ] (var "fail" @@ ( op (string "Failed to parse JSON value ") "++" (var "unpack" @@ var "s"))) ])
@@ -1969,7 +2011,7 @@ mkFromJSON objName name s =
 --              if (name == "preferred_locales") then (trace (show $ ppSchema s)) else id $
               let properties = sortOn fst $ (InsOrd.toList (_schemaProperties s))
               in instance' (var "FromJSON" @@ (var $ textToPascalName name))
-                [ funBinds "parseJSON" [ match [bvar "(Data.Aeson.Object o)"] $
+                [ funBinds "parseJSON" [ match [bvar "(Aeson.Object o)"] $
                               case properties of
                                 -- FIXME: the [] case probably happens when there are only additionalPropreties -- aka a dictionary of key/value pairs where th
                                 -- the additionlProperties are the key names
@@ -2082,9 +2124,10 @@ mkObject gs (objName', schema) =
   in {- (mkFromJSON objName schema) : -}
       (schemaToTypeDecls gs False SkipToStripeParam objName objName schema)
 
-mkComponents :: OpenApi -> IO ()
+-- returns a list of module names to put in the .cabal file
+mkComponents :: OpenApi -> IO [String]
 mkComponents oa =
-  mapM_ mkComponent (InsOrd.toList (_componentsSchemas (_openApiComponents oa)))
+  mapM mkComponent (InsOrd.toList (_componentsSchemas (_openApiComponents oa)))
 
 breakCycle :: String -> RdrNameStr -> Bool
 {-
@@ -2121,8 +2164,10 @@ breakCycle _        "Component.Quote" = True
 breakCycle _        "Component.BalanceTransaction" = True
 breakCycle _        "Component.Invoice" = True
 breakCycle _        "Component.IssuingTransaction" = True
+breakCycle _        "Component.IssuingAuthorization" = True
 breakCycle _        "Component.TreasuryTransaction" = True
 breakCycle _        "Component.CustomerBalanceTransaction" = True
+breakCycle _        "Component.CustomerCashBalanceTransaction" = True
 -- breakCycle _        "BankAccount" = True
 
 
@@ -2140,7 +2185,8 @@ skipImport a b = if breakCycle a b then Just else const Nothing
 
 
 -- turn each component into a separate Haskell module
-mkComponent :: (Text, Schema) -> IO ()
+-- returns name of module
+mkComponent :: (Text, Schema) -> IO String
 mkComponent component@(name, schema) =
   do let pname :: String
          pname = T.unpack $ textToPascalName name
@@ -2160,7 +2206,7 @@ mkComponent component@(name, schema) =
            , import' "Control.Monad" `exposing` [ var "mzero" ]
            , import' "Data.Aeson" `exposing` [ thingWith "FromJSON" [ "parseJSON" ]
                                              , thingAll "ToJSON"
-                                             , thingWith "Value" [ "String", "Object", "Bool" ]
+--                                             , thingWith "Value" [ "String", "Object", "Bool" ]
                                              , var "Object"
                                              , var "(.:)"
                                              , var "(.:?)"
@@ -2186,7 +2232,7 @@ mkComponent component@(name, schema) =
            , import' "Web.Stripe.Types" `exposing` [ thingAll "Expandable"
                                                    , thingAll "StripeList"
                                                    , thingAll "Lines"
-                                                   , thingWith "LineItems" []
+--                                                   , thingWith "LineItems" []
                                                    , thingWith "Metadata" []
                                                    , var "ExpandsTo"
                                                    , var "Amount"
@@ -2216,11 +2262,11 @@ mkComponent component@(name, schema) =
      createDirectoryIfMissing True "_generated/src/Web/Stripe/Component/"
      T.writeFile ("_generated/src/Web/Stripe/Component/" <> pname <> ".hs") formatted
      mkHsBoot component
-     pure ()
+     pure $ "Web.Stripe.Component." <> pname
 
 mkHsBoot :: (Text, Schema) -> IO ()
 mkHsBoot component@(name, schema)
-  | name `elem` ["charge", "file_link", "external_account", "payment_method", "tax_id", "discount", "payment_source", "invoice_setting_customer_setting", "subscription", "transfer", "api_errors", "setup_attempt", "payment_intent", "transfer_reversal", "account", "application_fee", "quote", "balance_transaction", "invoice", "issuing.transaction", "product", "treasury.transaction", "customer_balance_transaction"] =
+  | name `elem` ["charge", "file_link", "external_account", "payment_method", "tax_id", "discount", "payment_source", "invoice_setting_customer_setting", "subscription", "transfer", "api_errors", "setup_attempt", "payment_intent", "transfer_reversal", "account", "application_fee", "quote", "balance_transaction", "invoice", "issuing.transaction", "product", "treasury.transaction", "customer_balance_transaction", "issuing.authorization", "customer_cash_balance_transaction"] =
   do let extensions = [ DataKinds
                       , DeriveDataTypeable
                       , FlexibleContexts
@@ -2237,7 +2283,7 @@ mkHsBoot component@(name, schema)
            , import' "Control.Monad" `exposing` [ var "mzero" ]
            , import' "Data.Aeson" `exposing` [ thingWith "FromJSON" [ "parseJSON" ]
                                              , thingAll "ToJSON"
-                                             , thingWith "Value" [ "String", "Object", "Bool" ]
+--                                             , thingWith "Value" [ "String", "Object", "Bool" ]
                                              , var "Object"
                                              , var "(.:)"
                                              , var "(.:?)"
@@ -2787,12 +2833,16 @@ main =
      copyFile "static/src/Web/Stripe/OneOf.hs"         "_generated/src/Web/Stripe/OneOf.hs"
      copyFile "static/src/Web/Stripe/Util.hs"          "_generated/src/Web/Stripe/Util.hs"
      copyFile "static/src/Web/Stripe/Types.hs"          "_generated/src/Web/Stripe/Types.hs"
-     copyFile "static/stripe-core.cabal"               "_generated/stripe-core.cabal"
      copyFile "static/cabal.project"                   "_generated/cabal.project"
      copyFile "static/shell.nix"                       "_generated/shell.nix"
 
+     componentModuleNames <- mkComponents oa
+
+     -- create .cabal file
+     copyFile "static/stripe-core.cabal"               "_generated/stripe-core.cabal"
+     appendFile "_generated/stripe-core.cabal" (unlines (map (\m -> "                       " ++ m) (nub $ sort $ componentModuleNames))) -- FIXME: why are some component names duplicated?
+
 --     mkTypes oa
-     mkComponents oa
 
      -- Web.Stripe.Account
      mkPaths oa [("/v1/account", Just "AccountId")] (NonEmpty.singleton "Account")
@@ -2828,6 +2878,9 @@ main =
      mkPaths oa [ ("/v1/plans" , Just "PlanId")
 --                , ("/v1/subscriptions/{subscription_exposed_id}", Just "SubscriptionId")
                 ] (NonEmpty.singleton "Plans")
+
+     mkPaths oa [ ("/v1/checkout/sessions" , Just "CheckoutSessionId")
+                ] (NonEmpty.singleton "CheckoutSession")
 
      -- Web.Stripe.Plans
      {-
